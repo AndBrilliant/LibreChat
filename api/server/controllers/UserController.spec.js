@@ -330,6 +330,17 @@ describe('deleteUserController', () => {
 
     expect(mockRes.status).toHaveBeenCalledWith(200);
     expect(mockRes.send).toHaveBeenCalledWith({ message: 'User deleted' });
+
+    // The user document is the RETRY MARKER and must be deleted LAST: a crash or
+    // SIGTERM mid-cascade after an earlier user-doc delete made every remaining
+    // resource unreachable (getUsersPendingDeletion could no longer rediscover
+    // the account), permanently orphaning shared links, files, and agents.
+    const db = require('~/models');
+    const deleteUserOrder = db.deleteUserById.mock.invocationCallOrder[0];
+    const before = [db.deleteMessages, db.deleteFiles, db.deleteUserAgents, db.deleteAclEntries];
+    for (const fn of before) {
+      expect(fn.mock.invocationCallOrder[0]).toBeLessThan(deleteUserOrder);
+    }
   });
 
   it('sweep defers a user whose auth-cache fence cannot be re-established', async () => {

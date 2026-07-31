@@ -16,6 +16,7 @@ const {
   extractWebSearchEnvVars,
   deleteAgentCheckpoints,
   deleteAllSharedLinksWithCleanup,
+  registerShutdownTask,
 } = require('@librechat/api');
 const {
   Tools,
@@ -470,11 +471,7 @@ const executeUserDeletion = async (user, providedAppConfig) => {
     logger.error('[executeUserDeletion] Error deleting user convos, likely no convos', error);
   }
   await deleteUserPluginAuth(user.id, null, true);
-  // BEFORE the irreversible user delete: if this throws afterwards the user document
-  // is already gone, so nothing can retry the cascade and their schedule prompts
-  // (which have no TTL) would persist indefinitely.
   await db.deleteSchedulesByUser(user.id);
-  await db.deleteUserById(user.id);
   await deleteAllSharedLinksWithCleanup(user.id);
   await deleteUserFiles(req);
   await db.deleteFiles(null, user.id);
@@ -491,6 +488,14 @@ const executeUserDeletion = async (user, providedAppConfig) => {
   await db.deleteTokens({ userId: user.id });
   await db.removeUserFromAllGroups(user.id);
   await db.deleteAclEntries({ principalId: user._id });
+  // The user document goes LAST: it is the retry marker. Every step above is an
+  // idempotent bulk delete, so an interruption (crash, SIGTERM mid-sweep) leaves the
+  // document and its deletion markers in place and the next pass re-runs the whole
+  // cascade; deleting the document earlier made everything after it unreachable —
+  // getUsersPendingDeletion could no longer rediscover the account, permanently
+  // orphaning shared links, files, agents, and the rest. Authentication is refused
+  // behind the barrier the whole time, so the surviving document admits nothing.
+  await db.deleteUserById(user.id);
   logger.info(`User deleted account. Email: ${user.email} ID: ${user.id}`);
 };
 
@@ -564,6 +569,11 @@ const processPendingUserDeletions = async () => {
 
 const PENDING_DELETION_SWEEP_INTERVAL_MS = 5 * 60_000;
 let pendingDeletionSweepStarted = false;
+let pendingDeletionSweepStopped = false;
+/** The in-flight pass, so graceful shutdown can drain it instead of truncating a
+ *  cascade mid-write. The user-document-last ordering makes even a hard kill
+ *  recoverable; this keeps the ORDERLY path from relying on that backstop. */
+let activePendingDeletionPass = null;
 
 /** Idempotent per process; safe in every worker (the pass itself is idempotent). */
 const startPendingDeletionSweep = () => {
@@ -571,13 +581,26 @@ const startPendingDeletionSweep = () => {
     return;
   }
   pendingDeletionSweepStarted = true;
-  const run = () =>
-    processPendingUserDeletions().catch((err) =>
-      logger.error('[startPendingDeletionSweep] Sweep pass failed', err),
-    );
+  const run = () => {
+    if (pendingDeletionSweepStopped) {
+      return;
+    }
+    activePendingDeletionPass = processPendingUserDeletions()
+      .catch((err) => logger.error('[startPendingDeletionSweep] Sweep pass failed', err))
+      .finally(() => {
+        activePendingDeletionPass = null;
+      });
+  };
   const timer = setInterval(run, PENDING_DELETION_SWEEP_INTERVAL_MS);
   timer.unref?.();
   setTimeout(run, PENDING_DELETION_MIN_AGE_MS).unref?.();
+  registerShutdownTask('pending deletion sweep', async () => {
+    pendingDeletionSweepStopped = true;
+    clearInterval(timer);
+    if (activePendingDeletionPass) {
+      await activePendingDeletionPass;
+    }
+  });
 };
 
 const verifyEmailController = async (req, res) => {

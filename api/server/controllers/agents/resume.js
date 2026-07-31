@@ -20,6 +20,7 @@ const {
   isSteerPreemptSupported,
   toPendingSteer,
 } = require('@librechat/api');
+const { isBalanceViolationError } = require('~/server/controllers/agents/errors');
 const { disposeClient } = require('~/server/cleanup');
 const {
   getMCPRequestContext,
@@ -623,6 +624,10 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
       // no other gate here can see it, and approving hours later would run a fresh
       // billed turn for a schedule the system already switched off.
       automatic: job.metadata.scheduleManual !== '1',
+      // Re-apply the LIVE dispatch policy (global kill switch, owner availability,
+      // SCHEDULES:USE) the fire path checked: all three can change while the
+      // approval sits unanswered, and none of them touch the row.
+      policy: true,
     }))
   ) {
     logger.info(
@@ -1123,12 +1128,16 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
       // records the failure instead of the run lingering to the abandonment sweep.
       let scheduleOutcomeRecorded = true;
       if (job.metadata?.scheduleId) {
+        // Same classification as the initial fire's catch: a mid-continuation
+        // balance refusal is the OWNER's credits, not a schedule fault — it walks
+        // the insufficient_balance streak, not too_many_failures.
+        const balanceRefusal = isBalanceViolationError(err);
         scheduleOutcomeRecorded = await recordScheduleOutcome({
           scheduleId: job.metadata.scheduleId,
           scheduledFor: job.metadata.scheduledFor,
-          status: 'error',
+          status: balanceRefusal ? 'skipped_balance' : 'error',
           conversationId: streamId,
-          error: err?.message ?? 'Resume failed',
+          ...(balanceRefusal ? {} : { error: err?.message ?? 'Resume failed' }),
         });
       }
       try {

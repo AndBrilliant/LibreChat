@@ -3,6 +3,15 @@ import type { TScheduleCadence } from 'librechat-data-provider';
 
 export const SCHEDULE_JITTER_WINDOW_MS = 120_000;
 
+/**
+ * Spring-forward compresses consecutive wall-clock occurrences by up to an hour, so
+ * the ENFORCEABLE minimum for day-and-longer gaps is the nominal gap minus 60
+ * minutes: a floor set exactly at the nominal value would otherwise admit a schedule
+ * that genuinely violates it once a year. Hourly gaps are unaffected (the skipped
+ * hour lengthens, never shortens, the gap between occurrences).
+ */
+const DST_COMPRESSION_MINUTES = 60;
+
 const WEEKLY_DEFAULT_DAY = 1;
 
 /**
@@ -40,7 +49,7 @@ export function cadenceIntervalMinutes(cadence: TScheduleCadence): number {
     return 60;
   }
   if (cadence.frequency === 'daily' || cadence.frequency === 'weekdays') {
-    return 24 * 60;
+    return 24 * 60 - DST_COMPRESSION_MINUTES;
   }
   // Deduped defensively: the payload schema normalizes new writes, but a legacy
   // stored [1, 1] would otherwise read as a zero-day gap and fail every floor.
@@ -48,7 +57,7 @@ export function cadenceIntervalMinutes(cadence: TScheduleCadence): number {
     ? Array.from(new Set(cadence.daysOfWeek))
     : [WEEKLY_DEFAULT_DAY];
   if (days.length <= 1) {
-    return 7 * 24 * 60;
+    return 7 * 24 * 60 - DST_COMPRESSION_MINUTES;
   }
   // The interval floor must reflect the SHORTEST gap between selected days
   // (incl. the week wrap-around), not the average — e.g. [Mon, Tue] fires 24h
@@ -59,7 +68,7 @@ export function cadenceIntervalMinutes(cadence: TScheduleCadence): number {
     const gap = i + 1 < sorted.length ? sorted[i + 1] - sorted[i] : 7 - sorted[i] + sorted[0];
     minGapDays = Math.min(minGapDays, gap);
   }
-  return minGapDays * 24 * 60;
+  return minGapDays * 24 * 60 - DST_COMPRESSION_MINUTES;
 }
 
 /**

@@ -469,6 +469,41 @@ describe('attachment hold renewal', () => {
   });
 });
 
+describe('isScheduleLive policy recheck', () => {
+  const liveRow = { id: 's1', user: 'u1', enabled: true } as never;
+
+  it('refuses a resume while the operator kill switch is up', async () => {
+    const service = makeService(jest.fn<Promise<ActiveRun[]>, [string]>().mockResolvedValue([]));
+    const methods = service.engineDeps.methods as unknown as { getScheduleById: jest.Mock };
+    methods.getScheduleById = jest.fn(async () => liveRow);
+    process.env.SCHEDULES_DISABLED = 'true';
+    try {
+      // The row-level checks alone pass; only the policy recheck sees the switch.
+      await expect(service.isScheduleLive('s1')).resolves.toBe(true);
+      // A pause can sit for hours; an approval must not start a billed continuation
+      // the operator believes is stopped.
+      await expect(service.isScheduleLive('s1', undefined, { policy: true })).resolves.toBe(false);
+    } finally {
+      delete process.env.SCHEDULES_DISABLED;
+    }
+  });
+
+  it('refuses a resume when the owner lost SCHEDULES:USE', async () => {
+    const service = makeService(jest.fn<Promise<ActiveRun[]>, [string]>().mockResolvedValue([]));
+    const methods = service.engineDeps.methods as unknown as {
+      getScheduleById: jest.Mock;
+      getRoleByName: jest.Mock;
+    };
+    methods.getScheduleById = jest.fn(async () => liveRow);
+    methods.getRoleByName = jest.fn(async () => ({ permissions: { SCHEDULES: { USE: false } } }));
+    (service.engineDeps as unknown as { getUserContext: jest.Mock }).getUserContext = jest.fn(
+      async () => ({ id: 'u1', tenantId: 't1', role: 'USER' }),
+    );
+
+    await expect(service.isScheduleLive('s1', undefined, { policy: true })).resolves.toBe(false);
+  });
+});
+
 describe('quiesceUserSchedules drain wait', () => {
   afterEach(() => {
     mockJobStore = null;

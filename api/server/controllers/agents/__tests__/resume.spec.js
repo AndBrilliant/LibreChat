@@ -387,7 +387,12 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       const res = await post(approveBody());
 
       expect(res.status).toBe(409);
-      expect(mockIsScheduleLive).toHaveBeenCalledWith('sched-1', undefined, { automatic: true });
+      // policy: true re-applies the live dispatch policy (global kill switch, owner
+      // availability, SCHEDULES:USE) — all three can change while the approval sits.
+      expect(mockIsScheduleLive).toHaveBeenCalledWith('sched-1', undefined, {
+        automatic: true,
+        policy: true,
+      });
       expect(mockGenerationJobManager.approvals.resolve).not.toHaveBeenCalled();
       // The prompt is retired so the stream gets a terminal event instead of hanging.
       expect(mockGenerationJobManager.expireApproval).toHaveBeenCalledWith(CONVO_ID, ACTION_ID);
@@ -1417,6 +1422,33 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
 
       expect(mockGenerationJobManager.emitError).not.toHaveBeenCalled();
       expect(mockGenerationJobManager.completeJob).not.toHaveBeenCalled();
+    });
+
+    it('classifies a mid-continuation balance refusal as skipped_balance', async () => {
+      mockGenerationJobManager.getJob.mockResolvedValue(
+        makeToolApprovalJob({ metadata: { scheduleId: 'sched-1', scheduledFor: SCHEDULED_FOR } }),
+      );
+      mockJobStore.getJob.mockResolvedValue({ createdAt: 1000, status: 'running' });
+      mockRecordScheduleOutcome.mockResolvedValue(true);
+      mockInitializeClient.mockResolvedValue({
+        client: makeClient({
+          resumeCompletion: jest
+            .fn()
+            .mockRejectedValue(new Error(JSON.stringify({ type: 'token_balance' }))),
+        }),
+        userMCPAuthMap: {},
+      });
+
+      const res = await post(approveBody());
+      expect(res.status).toBe(200);
+      await settled;
+      await flush();
+
+      // The owner's credits ran out mid-continuation: insufficient_balance streak,
+      // not too_many_failures — same classification as the initial fire's catch.
+      expect(mockRecordScheduleOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({ scheduleId: 'sched-1', status: 'skipped_balance' }),
+      );
     });
 
     it('resume failure: emits an error, finalizes the job, and prunes the checkpoint', async () => {

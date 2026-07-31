@@ -192,7 +192,7 @@ export interface SchedulesService {
   isScheduleLive: (
     scheduleId: string,
     expectedConfigRevision?: number,
-    options?: { automatic?: boolean },
+    options?: { automatic?: boolean; policy?: boolean },
   ) => Promise<boolean>;
   /** Soft-deletes an owner's schedule: stop claims, abort active runs, drain, erase. */
   deleteScheduleForOwner: (scheduleId: string, userId: string) => Promise<ScheduleDeleteResult>;
@@ -820,7 +820,7 @@ export function createSchedulesService(
   async function isScheduleLive(
     scheduleId: string,
     expectedConfigRevision?: number,
-    options?: { automatic?: boolean },
+    options?: { automatic?: boolean; policy?: boolean },
   ): Promise<boolean> {
     if (!scheduleId) {
       return false;
@@ -850,6 +850,29 @@ export function createSchedulesService(
       schedule.configRevision !== expectedConfigRevision
     ) {
       return false;
+    }
+    // LIVE dispatch policy, re-applied exactly as the fire path applies it. A pause
+    // can sit unanswered for hours, and an operator's global kill switch, a narrowed
+    // `interface.schedules` availability, or a revoked SCHEDULES:USE permission
+    // landing in that window touches neither the row nor its revision — none of the
+    // checks above can see it, and approving the pause would start a fresh billed
+    // continuation the operator believes is stopped. Applies to manual runs too: an
+    // emergency stop must stop those approvals as well.
+    if (options?.policy === true) {
+      if (await engineDeps.isGloballyDisabled()) {
+        return false;
+      }
+      const owner = await engineDeps.getUserContext(schedule.user);
+      if (owner == null) {
+        return false;
+      }
+      const limits = await engineDeps.runInTenantContext(owner, () => getLimits(owner));
+      if (!limits.enabled) {
+        return false;
+      }
+      if (!(await engineDeps.hasScheduleAccess(owner))) {
+        return false;
+      }
     }
     return true;
   }
