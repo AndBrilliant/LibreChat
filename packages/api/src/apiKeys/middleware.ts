@@ -90,6 +90,20 @@ export function createRequireApiKeyAuth(deps: ApiKeyAuthDependencies) {
         });
       }
 
+      // Deletion barrier: an API key must not admit work for a user whose
+      // destructive cascade (or deferred sweep) is running — writes admitted here
+      // would recreate data behind it.
+      if (user.deletionRequestedAt != null) {
+        logger.warn(`[requireApiKeyAuth] Refusing key for deleting user: ${keyValidation.userId}`);
+        return res.status(401).json({
+          error: {
+            message: 'Account deletion in progress',
+            type: 'invalid_request_error',
+            code: 'invalid_api_key',
+          },
+        });
+      }
+
       user.id = (user._id as Types.ObjectId).toString();
       req.user = user as IUser & { id: string };
       req.apiKeyId = keyValidation.keyId;

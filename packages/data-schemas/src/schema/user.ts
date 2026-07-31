@@ -193,6 +193,13 @@ const userSchema: Schema<IUser> = new Schema<IUser>(
 );
 
 userSchema.index({ email: 1, tenantId: 1 }, { unique: true });
+// Pending-deletion sweep: bounded least-recently-attempted reads over the rare rows
+// whose barrier is up. Partial, so the index stays empty on healthy collections and
+// the every-5-minutes pass never touches more than the deleting handful.
+userSchema.index(
+  { deletionSweepAt: 1, deletionRequestedAt: 1 },
+  { partialFilterExpression: { deletionRequestedAt: { $exists: true } } },
+);
 userSchema.index({ role: 1, tenantId: 1 });
 userSchema.index({ idOnTheSource: 1, openidIssuer: 1, tenantId: 1 });
 

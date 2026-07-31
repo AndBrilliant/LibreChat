@@ -91,6 +91,7 @@ export interface IScheduleRun {
   /** When reconciliation last examined this row; orders the paused window so no row
    *  can be starved by a full batch of still-live pauses ahead of it. */
   reconciledAt?: Date;
+  resumeClaimedAt?: Date;
   createdAt?: Date;
   updatedAt?: Date;
 }

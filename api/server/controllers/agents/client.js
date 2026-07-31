@@ -2949,6 +2949,11 @@ class AgentClient extends BaseClient {
           '[api/server/controllers/agents/client.js #resumeCompletion] Unhandled error',
           err,
         );
+        // Surfaced to the resume controller WITHOUT rethrowing: the interactive UX
+        // deliberately finalizes with the error as content, but a scheduled run's
+        // bookkeeping must still classify it (a balance refusal swallowed here was
+        // recorded as `success`, never reaching the insufficient_balance policy).
+        this.resumeError = err;
         this.contentParts.push({
           type: ContentTypes.ERROR,
           [ContentTypes.ERROR]: `An error occurred while resuming the request${err?.message ? `: ${err.message}` : ''}`,

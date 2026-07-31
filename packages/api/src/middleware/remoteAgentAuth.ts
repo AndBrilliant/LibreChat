@@ -686,6 +686,14 @@ export function createRemoteAgentAuth({
 
       await updateResolvedUser(userResolution, updateUser);
 
+      // Deletion barrier: same refusal as every other admission path — a deleting
+      // user's remote OIDC token must not admit writes behind the cascade.
+      if ((userResolution.user as { deletionRequestedAt?: Date }).deletionRequestedAt != null) {
+        logger.warn('[remoteAgentAuth] Refusing OIDC token for deleting user');
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
       req.user = userResolution.user;
       return next();
     } catch (err) {

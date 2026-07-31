@@ -31,6 +31,7 @@ const {
   isScheduleLive,
   clearScheduledJob,
   awaitStopAbortPersistence,
+  markScheduledRunResumeClaimed,
 } = require('~/server/services/Schedules');
 const { saveMessage, getConvo, getMessages } = require('~/models');
 
@@ -195,6 +196,18 @@ async function persistRePauseProgress({ req, client, job, streamId, conversation
   } catch (err) {
     logger.error('[ResumeAgentController] Failed to persist re-pause progress', err);
   }
+}
+
+/**
+ * The schedule outcome for a resumed turn that reached finalize. resumeCompletion
+ * deliberately swallows continuation errors into an ERROR content part (the
+ * interactive UX finalizes with the error visible), surfacing them on
+ * `client.resumeError` — so a mid-continuation balance refusal must be classified
+ * HERE, not in the catch below, or the schedule records `success` and the
+ * insufficient_balance policy never walks.
+ */
+function resumedOutcomeStatus(client) {
+  return isBalanceViolationError(client?.resumeError) ? 'skipped_balance' : 'success';
 }
 
 /** Untenanted jobs (pre-multi-tenancy) remain accessible if the userId check passes. */
@@ -444,7 +457,7 @@ async function finalizeResumedTurn({
       await recordScheduleOutcome({
         scheduleId: meta.scheduleId,
         scheduledFor: meta.scheduledFor,
-        status: 'success',
+        status: resumedOutcomeStatus(client),
         conversationId,
       });
     }
@@ -515,7 +528,7 @@ async function finalizeResumedTurn({
     scheduleOutcomeRecorded = await recordScheduleOutcome({
       scheduleId: meta.scheduleId,
       scheduledFor: meta.scheduledFor,
-      status: 'success',
+      status: resumedOutcomeStatus(client),
       conversationId,
     });
   }
@@ -750,7 +763,17 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
   // observes a running generation and waits for it, while one that started before it is
   // caught here.
   if (job.metadata?.scheduleId) {
+    // Stamp the run RESUME-CLAIMED before anything else: from here until the pause
+    // record (or the terminal outcome) this run's writes are a hand-off in flight,
+    // and a deletion drain observing a RE-PAUSED job mid-branch must defer rather
+    // than settle while persistRePauseProgress is still landing. The pause record
+    // clears the stamp; a crash leaves it to age out on the staleness bound.
+    await markScheduledRunResumeClaimed(
+      job.metadata.scheduleId,
+      new Date(job.metadata.scheduledFor),
+    );
     const stillLive = await isScheduleLive(job.metadata.scheduleId, pausedConfigRevision, {
+      policy: true,
       automatic: job.metadata.scheduleManual !== '1',
     }).catch(() => false);
     if (!stillLive) {

@@ -602,6 +602,13 @@ async function processOpenIDAuth(tokenset, existingUsersOnly = false) {
     throw new Error(ErrorTypes.AUTH_FAILED);
   }
 
+  // Deletion barrier: a user whose destructive cascade (or deferred sweep) is
+  // running must not mint a fresh session that admits writes behind it.
+  if (user?.deletionRequestedAt != null) {
+    logger.warn(`[openidStrategy] Refusing login for deleting user: ${user._id}`);
+    throw new Error(ErrorTypes.AUTH_FAILED);
+  }
+
   const appConfig = user?.tenantId ? await resolveAppConfigForUser(getAppConfig, user) : baseConfig;
 
   if (!isEmailDomainAllowed(email, appConfig?.registration?.allowedDomains)) {

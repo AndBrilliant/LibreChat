@@ -30,6 +30,13 @@ async function passportLogin(req, email, password, done) {
       return done(null, false, { message: 'Email does not exist.' });
     }
 
+    // Deletion barrier: a user whose destructive cascade (or deferred sweep) is
+    // running must not mint a fresh session that admits writes behind it.
+    if (user.deletionRequestedAt != null) {
+      logger.warn(`[Login] Refusing login for deleting user: ${user._id}`);
+      return done(null, false, { message: 'Account deletion in progress' });
+    }
+
     if (!user.password) {
       logError('Passport Local Strategy - User has no password', { email });
       logger.error(`[Login] [Login failed] [Username: ${email}] [Request-IP: ${req.ip}]`);

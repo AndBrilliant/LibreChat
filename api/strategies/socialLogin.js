@@ -41,6 +41,16 @@ const socialLogin =
         }
       }
 
+      // Deletion barrier: a user whose destructive cascade (or deferred sweep) is
+      // running must not mint a fresh session that admits writes behind it.
+      if (existingUser?.deletionRequestedAt != null) {
+        logger.warn(`[${provider}Login] Refusing login for deleting user: ${existingUser._id}`);
+        const error = new Error(ErrorTypes.AUTH_FAILED);
+        error.code = ErrorTypes.AUTH_FAILED;
+        error.message = 'Account deletion in progress';
+        return cb(error);
+      }
+
       const appConfig = existingUser?.tenantId
         ? await resolveAppConfigForUser(getAppConfig, existingUser)
         : baseConfig;

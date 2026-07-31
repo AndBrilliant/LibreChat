@@ -4,13 +4,14 @@ import type { TScheduleCadence } from 'librechat-data-provider';
 export const SCHEDULE_JITTER_WINDOW_MS = 120_000;
 
 /**
- * Spring-forward compresses consecutive wall-clock occurrences by up to an hour, so
- * the ENFORCEABLE minimum for day-and-longer gaps is the nominal gap minus 60
- * minutes: a floor set exactly at the nominal value would otherwise admit a schedule
- * that genuinely violates it once a year. Hourly gaps are unaffected (the skipped
- * hour lengthens, never shortens, the gap between occurrences).
+ * Spring-forward compresses consecutive wall-clock occurrences, so the ENFORCEABLE
+ * minimum for day-and-longer gaps is the nominal gap minus the largest real-world
+ * transition: two hours (Antarctica/Troll; every other zone shifts at most one).
+ * A floor set exactly at the nominal value would otherwise admit a schedule that
+ * genuinely violates it once a year. Hourly gaps are unaffected (the skipped hours
+ * lengthen, never shorten, the gap between occurrences).
  */
-const DST_COMPRESSION_MINUTES = 60;
+const DST_COMPRESSION_MINUTES = 120;
 
 const WEEKLY_DEFAULT_DAY = 1;
 

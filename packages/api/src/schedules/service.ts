@@ -16,10 +16,15 @@ import type {
 import type { SerializableJobData } from '../stream/interfaces/IJobStore';
 import type { BalanceUpdateFields } from '../types/balance';
 import type { GetAppConfigOptions } from '../app/service';
+import {
+  DEFAULT_SCHEDULE_LIMITS,
+  SCHEDULE_FILE_HOLD,
+  hasResumeHandoffInFlight,
+  hasAbortInFlight,
+} from './types';
 import { generateShortLivedToken, SCHEDULE_FIRE_SCOPE, SCHEDULE_MANUAL_CLAIM } from '../crypto/jwt';
 import { deleteAgentCheckpoint, captureAgentCheckpointGeneration } from '../agents/checkpointer';
 import { fireSchedule, SCHEDULE_FIRE_TOKEN_TTL, BALANCE_SKIP_DISABLE_THRESHOLD } from './fire';
-import { DEFAULT_SCHEDULE_LIMITS, SCHEDULE_FILE_HOLD, hasAbortInFlight } from './types';
 import { GenerationJobManager } from '../stream/GenerationJobManager';
 import { buildBalanceUpdateFields } from '../middleware/balance';
 import { getAppConfigOptionsFromUser } from '../app/service';
@@ -165,6 +170,8 @@ export interface SchedulesService {
    * partial-response save) has landed; releases the generation owner's settlement
    * barrier (see awaitStopAbortPersistence).
    */
+  /** Stamps a paused run resume-claimed (re-pause hand-off fence). Best-effort. */
+  markScheduledRunResumeClaimed: (scheduleId: string, scheduledFor: Date) => Promise<void>;
   markScheduledRunAbortPersisted: (scheduleId: string, scheduledFor: Date) => Promise<void>;
   /**
    * The generation owner's half of the abort-settlement barrier: when THIS run's abort
@@ -771,6 +778,17 @@ export function createSchedulesService(
     }
   }
 
+  /** Stamps a paused run resume-claimed; see markRunResumeClaimed. Best-effort:
+   *  a failed stamp only narrows the re-pause hand-off fence, never blocks the resume. */
+  async function markScheduledRunResumeClaimed(
+    scheduleId: string,
+    scheduledFor: Date,
+  ): Promise<void> {
+    await methods.markRunResumeClaimed(scheduleId, scheduledFor).catch((err) => {
+      logger.warn('[schedules] failed to stamp resume claim:', err);
+    });
+  }
+
   async function markScheduledRunAbortPersisted(
     scheduleId: string,
     scheduledFor: Date,
@@ -1006,7 +1024,9 @@ export function createSchedulesService(
       // window reconciler) flips the row to requires_action, so the deferral is
       // bounded — a later pass settles it.
       const pauseHandoffInFlight =
-        isThisGeneration && live.job?.status === 'requires_action' && run.status === 'started';
+        isThisGeneration &&
+        live.job?.status === 'requires_action' &&
+        (run.status === 'started' || hasResumeHandoffInFlight(run, Date.now()));
       const settleable =
         live.known &&
         !hasAbortInFlight(run, Date.now()) &&
@@ -1165,7 +1185,9 @@ export function createSchedulesService(
       // row is still `started` has the controller's pause-branch writes in flight,
       // and settling on the job state alone confirms the drain before they land.
       const pauseHandoffInFlight =
-        isThisGeneration && live.job?.status === 'requires_action' && run.status === 'started';
+        isThisGeneration &&
+        live.job?.status === 'requires_action' &&
+        (run.status === 'started' || hasResumeHandoffInFlight(run, Date.now()));
       const settleable =
         live.known &&
         !abortInFlight &&
@@ -1269,6 +1291,7 @@ export function createSchedulesService(
     fireScheduleNow,
     recordScheduleOutcome,
     requestScheduledRunAbort,
+    markScheduledRunResumeClaimed,
     markScheduledRunAbortPersisted,
     awaitStopAbortPersistence,
     isScheduleLive,

@@ -194,6 +194,7 @@ export type ScheduleMethods = {
     IScheduleRun,
     'status' | 'abortRequestedAt' | 'abortSource' | 'abortPersistedAt'
   > | null>;
+  markRunResumeClaimed: (scheduleId: string, scheduledFor: Date) => Promise<void>;
   markRunAbortPersisted: (scheduleId: string, scheduledFor: Date) => Promise<void>;
   setRunFireDetails: (
     scheduleId: string,
@@ -807,6 +808,21 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
   /** Stamped by the interactive Stop route once ALL its writes (checkpoint prune,
    *  partial-response save) have landed; releases the generation owner's settlement
    *  barrier. Bookkeeping only: never touches `updatedAt`. */
+  /**
+   * Stamps a paused run as RESUME-CLAIMED: its approval was consumed and a
+   * continuation is running. While fresh, a re-paused job's state is a hand-off in
+   * flight (segment writes still landing), not settleable evidence. The pause
+   * record ($unset below) is the completion signal; a crash leaves the stamp to
+   * age out on the caller's staleness bound.
+   */
+  async function markRunResumeClaimed(scheduleId: string, scheduledFor: Date): Promise<void> {
+    await ScheduleRun().updateOne(
+      { scheduleId, scheduledFor, status: 'requires_action' },
+      { $set: { resumeClaimedAt: new Date() } },
+      { timestamps: false },
+    );
+  }
+
   async function markRunAbortPersisted(scheduleId: string, scheduledFor: Date): Promise<void> {
     await ScheduleRun().updateOne(
       { scheduleId, scheduledFor },
@@ -1111,7 +1127,10 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
           },
           // Leaving `started` frees the global capacity slot; the resume claims a
           // fresh one from the allocator rather than re-adopting a possibly-taken slot.
-          $unset: { capacitySlot: 1 },
+          // The pause record is also the resume hand-off's COMPLETION signal: the
+          // re-pause branch persists its segment before recording, so clearing the
+          // claim stamp here re-opens the run to quiesce settling.
+          $unset: { capacitySlot: 1, resumeClaimedAt: 1 },
         },
         { new: false },
       );
@@ -1631,6 +1650,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
     getCapacityOccupancy,
     requestRunAbort,
     getScheduleRunAbortState,
+    markRunResumeClaimed,
     markRunAbortPersisted,
     setRunFireDetails,
     countActiveRuns,

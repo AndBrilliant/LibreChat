@@ -17,6 +17,7 @@ const {
   deleteAgentCheckpoints,
   deleteAllSharedLinksWithCleanup,
   registerShutdownTask,
+  GenerationJobManager,
 } = require('@librechat/api');
 const {
   Tools,
@@ -453,6 +454,21 @@ const executeUserDeletion = async (user, providedAppConfig) => {
     }));
   /** Minimal request shim for the file-deletion service (reads user, config, body). */
   const req = { user, config: appConfig, body: {} };
+  // Abort the user's ACTIVE INTERACTIVE generations before destroying anything:
+  // authentication is already refused behind the barrier, but a generation admitted
+  // before it can keep writing for minutes. Best-effort — cross-replica delivery is
+  // unconfirmed by design (see FOLLOWUPS), and in-process/shared-store deployments
+  // get real aborts. Scheduled jobs were already settled by the quiesce.
+  try {
+    const activeJobIds = await GenerationJobManager.getActiveJobIdsForUser(user.id, user.tenantId);
+    for (const streamId of activeJobIds ?? []) {
+      await GenerationJobManager.abortJob(streamId).catch((err) =>
+        logger.warn(`[executeUserDeletion] Failed to abort active job ${streamId}`, err),
+      );
+    }
+  } catch (error) {
+    logger.warn('[executeUserDeletion] Failed to enumerate active jobs', error);
+  }
   await db.deleteMessages({ user: user.id });
   await db.deleteAllUserSessions({ userId: user.id });
   await db.deleteTransactions({ user: user.id });

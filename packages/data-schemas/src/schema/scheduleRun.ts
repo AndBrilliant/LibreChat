@@ -25,10 +25,15 @@ const scheduleRunSchema: Schema<IScheduleRunDocument> = new Schema(
     },
     firedAt: {
       type: Date,
-      index: { expireAfterSeconds: SCHEDULE_RUN_TTL_SECONDS },
     },
     conversationId: {
       type: String,
+    },
+    /** Fresh while a RESUME of this paused run is mid-flight; a re-pause hand-off's
+     *  writes are still landing, so quiesce must not settle on the paused job state.
+     *  Cleared by the pause record (the hand-off completion) or aged out. */
+    resumeClaimedAt: {
+      type: Date,
     },
     status: {
       type: String,
@@ -98,6 +103,20 @@ const scheduleRunSchema: Schema<IScheduleRunDocument> = new Schema(
 );
 
 scheduleRunSchema.index({ scheduleId: 1, scheduledFor: 1 }, { unique: true });
+// TTL retention applies only to SETTLED rows: an approval window configured longer
+// than the retention period would otherwise let Mongo expire a still-live
+// `requires_action` run — its retained job could then resume with no run row (no
+// bookkeeping), and deletion quiescing could no longer discover or abort it. TTL
+// indexes accept partialFilterExpression, so active rows simply never expire.
+scheduleRunSchema.index(
+  { firedAt: 1 },
+  {
+    expireAfterSeconds: SCHEDULE_RUN_TTL_SECONDS,
+    partialFilterExpression: {
+      status: { $in: ['success', 'error', 'interrupted', 'skipped_overlap', 'skipped_balance'] },
+    },
+  },
+);
 // At most ONE active (`started`) run per schedule, enforced by the DB rather than a
 // read-then-write check: a second occurrence inserting while one is already active
 // fails with a duplicate-key error instead of racing.

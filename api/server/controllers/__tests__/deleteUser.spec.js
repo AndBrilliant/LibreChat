@@ -39,6 +39,12 @@ jest.mock('@librechat/api', () => ({
   extractWebSearchEnvVars: jest.fn(),
   needsRefresh: jest.fn(),
   getNewS3URL: jest.fn(),
+  deleteAgentCheckpoints: jest.fn(async () => undefined),
+  registerShutdownTask: jest.fn(),
+  GenerationJobManager: {
+    getActiveJobIdsForUser: jest.fn(async () => []),
+    abortJob: jest.fn(async () => ({ success: true })),
+  },
   deleteAllSharedLinksWithCleanup: (...args) => mockDeleteAllSharedLinksWithCleanup(...args),
 }));
 

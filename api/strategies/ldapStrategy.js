@@ -129,6 +129,12 @@ const ldapLogin = new LdapStrategy(ldapOptions, async (userinfo, done) => {
     }
 
     let user = await findUser({ ldapId });
+    // Deletion barrier: a user whose destructive cascade (or deferred sweep) is
+    // running must not mint a fresh session that admits writes behind it.
+    if (user?.deletionRequestedAt != null) {
+      logger.warn(`[ldapStrategy] Refusing login for deleting user: ${user._id}`);
+      return done(null, false, { message: ErrorTypes.AUTH_FAILED });
+    }
     if (user && user.provider !== 'ldap') {
       logger.info(
         `[ldapStrategy] User ${user.email} already exists with provider ${user.provider}`,

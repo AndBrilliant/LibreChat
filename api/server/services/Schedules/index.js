@@ -36,6 +36,7 @@ module.exports = {
   markScheduledRunAbortPersisted: service.markScheduledRunAbortPersisted,
   awaitStopAbortPersistence: service.awaitStopAbortPersistence,
   isScheduleLive: service.isScheduleLive,
+  markScheduledRunResumeClaimed: service.markScheduledRunResumeClaimed,
   deleteScheduleForOwner: service.deleteScheduleForOwner,
   quiesceUserSchedules: service.quiesceUserSchedules,
   initializeScheduleEngine: service.initializeScheduleEngine,

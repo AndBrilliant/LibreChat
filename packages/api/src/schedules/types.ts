@@ -65,6 +65,23 @@ export const ABORT_OWNER_PRESUMED_ALIVE_MS: number = 30 * 60_000;
  * signalled (see `abortActiveRun` and the interactive abort route), which is what makes
  * it usable as evidence that post-abort job state is not yet a settled generation.
  */
+/** How long a resume-claim stamp fences quiesce settling before it is presumed
+ *  crashed. A resume's own generation shows `running` (already unsettleable);
+ *  this bound only covers the re-pause hand-off window plus crash recovery. */
+export const RESUME_HANDOFF_STALE_MS: number = 10 * 60_000;
+
+/** Whether a paused run's RESUME hand-off is still in flight: its approval was
+ *  consumed and the continuation's re-pause writes may still be landing, so the
+ *  paused job state is not settleable evidence yet. */
+export function hasResumeHandoffInFlight(
+  run: { resumeClaimedAt?: Date | null },
+  now: number,
+): boolean {
+  return (
+    run.resumeClaimedAt != null && now - run.resumeClaimedAt.getTime() < RESUME_HANDOFF_STALE_MS
+  );
+}
+
 export function hasAbortInFlight(run: { abortRequestedAt?: Date }, now: number): boolean {
   if (run.abortRequestedAt == null) {
     return false;

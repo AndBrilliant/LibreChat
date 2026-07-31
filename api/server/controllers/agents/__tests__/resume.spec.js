@@ -112,6 +112,7 @@ jest.mock('~/server/services/Schedules', () => ({
   isScheduleLive: (...args) => mockIsScheduleLive(...args),
   clearScheduledJob: (...args) => mockClearScheduledJob(...args),
   awaitStopAbortPersistence: jest.fn(() => Promise.resolve(true)),
+  markScheduledRunResumeClaimed: jest.fn(async () => undefined),
 }));
 
 jest.mock('~/server/services/MCPRequestContext', () => ({
@@ -443,7 +444,10 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
 
       await post(approveBody());
 
-      expect(mockIsScheduleLive).toHaveBeenCalledWith('sched-1', 7, { automatic: true });
+      expect(mockIsScheduleLive).toHaveBeenCalledWith('sched-1', 7, {
+        automatic: true,
+        policy: true,
+      });
       await settled;
     });
 
@@ -460,7 +464,10 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
 
       await post(approveBody());
 
-      expect(mockIsScheduleLive).toHaveBeenCalledWith('sched-1', undefined, { automatic: false });
+      expect(mockIsScheduleLive).toHaveBeenCalledWith('sched-1', undefined, {
+        automatic: false,
+        policy: true,
+      });
       await settled;
     });
 
@@ -1428,16 +1435,16 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       mockGenerationJobManager.getJob.mockResolvedValue(
         makeToolApprovalJob({ metadata: { scheduleId: 'sched-1', scheduledFor: SCHEDULED_FOR } }),
       );
-      mockJobStore.getJob.mockResolvedValue({ createdAt: 1000, status: 'running' });
       mockRecordScheduleOutcome.mockResolvedValue(true);
-      mockInitializeClient.mockResolvedValue({
-        client: makeClient({
-          resumeCompletion: jest
-            .fn()
-            .mockRejectedValue(new Error(JSON.stringify({ type: 'token_balance' }))),
-        }),
-        userMCPAuthMap: {},
+      // PRODUCTION SHAPE: resumeCompletion swallows continuation errors into an
+      // ERROR content part and RESOLVES, surfacing the error on client.resumeError —
+      // it does not reject. A rejecting mock exercised a path real runs never take
+      // and hid that the schedule recorded `success`.
+      const client = makeClient();
+      client.resumeCompletion = jest.fn().mockImplementation(async () => {
+        client.resumeError = new Error(JSON.stringify({ type: 'token_balance' }));
       });
+      mockInitializeClient.mockResolvedValue({ client, userMCPAuthMap: {} });
 
       const res = await post(approveBody());
       expect(res.status).toBe(200);
@@ -1448,6 +1455,9 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       // not too_many_failures — same classification as the initial fire's catch.
       expect(mockRecordScheduleOutcome).toHaveBeenCalledWith(
         expect.objectContaining({ scheduleId: 'sched-1', status: 'skipped_balance' }),
+      );
+      expect(mockRecordScheduleOutcome).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'success' }),
       );
     });
 
