@@ -999,18 +999,43 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
       GenerationJobManager.setContentParts(streamId, client.contentParts, job.createdAt);
     }
 
-    await client.resumeCompletion({
-      resumeValue: mapped.resumeValue,
-      seedContent,
-      runSteps: resumeState?.runSteps ?? [],
-      abortController: job.abortController,
-      // Carry the user's MCP auth so approved MCP tools run with their credentials.
-      userMCPAuthMap: result.userMCPAuthMap,
-      // Replay deferred tools discovered before the pause (captured at pause). The rebuilt
-      // graph passes `messages: []`, so without these an approved deferred tool would be
-      // absent from the schema-only toolMap and resume would fail with "unknown tool".
-      discoveredToolNames: job.metadata?.discoveredTools,
-    });
+    // Keep the resume hand-off fence FRESH for the continuation's whole lifetime: the
+    // claim-time stamp ages out on its staleness bound, so a continuation that runs
+    // longer than that and then pauses AGAIN would re-enter `requires_action` with an
+    // expired fence — quiesce could settle it while the re-pause writes were still
+    // landing. Refreshed at half the staleness bound; cleared by the pause record or
+    // aged out after a crash.
+    let fenceRefresh = null;
+    if (job.metadata?.scheduleId) {
+      fenceRefresh = setInterval(
+        () =>
+          markScheduledRunResumeClaimed(
+            job.metadata.scheduleId,
+            new Date(job.metadata.scheduledFor),
+          ).catch(() => undefined),
+        5 * 60_000,
+      );
+      fenceRefresh.unref?.();
+    }
+
+    try {
+      await client.resumeCompletion({
+        resumeValue: mapped.resumeValue,
+        seedContent,
+        runSteps: resumeState?.runSteps ?? [],
+        abortController: job.abortController,
+        // Carry the user's MCP auth so approved MCP tools run with their credentials.
+        userMCPAuthMap: result.userMCPAuthMap,
+        // Replay deferred tools discovered before the pause (captured at pause). The rebuilt
+        // graph passes `messages: []`, so without these an approved deferred tool would be
+        // absent from the schema-only toolMap and resume would fail with "unknown tool".
+        discoveredToolNames: job.metadata?.discoveredTools,
+      });
+    } finally {
+      if (fenceRefresh) {
+        clearInterval(fenceRefresh);
+      }
+    }
 
     // The model may pause AGAIN (another tool, or a follow-up question). The pending
     // action is already persisted + emitted; leave the job `requires_action`.

@@ -597,7 +597,7 @@ export function createSchedulesService(
     if (erasureSweep != null || engine != null) {
       return;
     }
-    erasureSweep = startScheduleErasureSweep({ methods });
+    erasureSweep = startScheduleErasureSweep({ methods, getJobStatus: engineDeps.getJobStatus });
   }
 
   async function initializeScheduleEngine(

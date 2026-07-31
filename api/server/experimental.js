@@ -46,6 +46,8 @@ const {
   getDeletingSchedules,
   eraseScheduleIfDrained,
   markEraseAttempted,
+  getActiveRunsForSchedule,
+  recordRunOutcome,
 } = require('~/models');
 const { checkMigrations } = require('./services/start/migration');
 const { configureGenerationStreams } = require('@librechat/api');
@@ -405,7 +407,26 @@ if (cluster.isMaster) {
     // from the very list they would use to retry. Idempotent and drain-checked, so
     // running it in every worker is safe.
     startScheduleErasureSweep({
-      methods: { getDeletingSchedules, eraseScheduleIfDrained, markEraseAttempted },
+      methods: {
+        getDeletingSchedules,
+        eraseScheduleIfDrained,
+        markEraseAttempted,
+        getActiveRunsForSchedule,
+        recordRunOutcome,
+      },
+      // Job state for the abandoned-run settle: null = confirmed absent, throw = unknown.
+      getJobStatus: async (conversationId) => {
+        const jobState = await GenerationJobManager.getJobStore()?.getJob(conversationId);
+        if (jobState == null) {
+          return null;
+        }
+        return {
+          status: jobState.status,
+          scheduleId: jobState.scheduleId,
+          scheduledFor: jobState.scheduledFor,
+          createdEventEmitted: jobState.createdEventEmitted === true,
+        };
+      },
     });
     // Same category of cleanup: finishes account deletions deferred on an unconfirmed
     // schedule quiesce (the durable barrier refuses authentication, so no client retry

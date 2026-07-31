@@ -10,7 +10,10 @@ export interface ApiKeyAuthDependencies {
     userId: Types.ObjectId;
     keyId: Types.ObjectId;
   } | null>;
-  findUser: (query: { _id: string | Types.ObjectId }) => Promise<IUser | null>;
+  findUser: (
+    query: { _id: string | Types.ObjectId },
+    fieldsToSelect?: string,
+  ) => Promise<IUser | null>;
 }
 
 export interface RemoteAgentAccessDependencies {
@@ -34,6 +37,10 @@ export interface RemoteAgentAccessRequest extends ApiKeyAuthRequest {
   agent?: { _id: Types.ObjectId; [key: string]: unknown };
   agentPermissions?: number;
 }
+
+/** Methods that cannot persist data; the sequenced barrier recheck is skipped for
+ *  them so read-only API-key traffic pays no extra round trip. */
+const API_KEY_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export function createRequireApiKeyAuth(deps: ApiKeyAuthDependencies) {
   return async (
@@ -102,6 +109,33 @@ export function createRequireApiKeyAuth(deps: ApiKeyAuthDependencies) {
             code: 'invalid_api_key',
           },
         });
+      }
+
+      // The read above can be a pre-barrier snapshot returned AFTER the barrier
+      // committed. A second read SEQUENCED after the first observes any barrier
+      // that committed before it — scoped to mutating requests, matching the local
+      // JWT path (only writes can recreate data during the cascade). Fails closed.
+      if (!API_KEY_SAFE_METHODS.has(req.method)) {
+        let barrier: { deletionRequestedAt?: Date } | null = null;
+        try {
+          barrier = (await deps.findUser({ _id: keyValidation.userId }, 'deletionRequestedAt')) as {
+            deletionRequestedAt?: Date;
+          } | null;
+        } catch {
+          barrier = null;
+        }
+        if (barrier == null || barrier.deletionRequestedAt != null) {
+          logger.warn(
+            `[requireApiKeyAuth] Refusing key for ${keyValidation.userId}: deletion barrier raised or unverifiable`,
+          );
+          return res.status(401).json({
+            error: {
+              message: 'Account deletion in progress',
+              type: 'invalid_request_error',
+              code: 'invalid_api_key',
+            },
+          });
+        }
       }
 
       user.id = (user._id as Types.ObjectId).toString();

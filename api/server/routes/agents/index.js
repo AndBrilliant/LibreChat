@@ -467,12 +467,15 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
     // means the stop never left this replica: the peer-owned generation keeps
     // running and billing, and a client retry would land on the terminal-status
     // branch below, which historically returned without republishing. Re-signal
-    // once and answer retryable instead of claiming success. Scheduled runs are
-    // exempt: their abort stamp + reconciler fence own that guarantee, and their
-    // owner's settlement is the durable acknowledgement.
+    // once and answer retryable instead of claiming success. SCHEDULED runs too:
+    // their abort stamp only fences premature settlement — it neither delivers the
+    // signal nor waits for it, so a 200 here would still leave the peer generating
+    // until the owner-death fence. The stamp stays unresolved on this exit (an
+    // undelivered abort must keep fencing the drains), and the retry never
+    // consults it: the job is already terminal, so the retry skips the live-job
+    // stamp path and lands on the terminal branch below.
     if (
       abortResult.success &&
-      !scheduledFireIdentity &&
       abortResult.signalDelivered === false &&
       abortResult.signalPublished === false
     ) {
@@ -502,13 +505,31 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
           // A swallowed republication failure must not read as success: with the
           // signal provably still on this replica, the peer-owned generation keeps
           // running, so the response stays retryable until a publish leaves (or
-          // this process turns out to own the generation).
-          if (!scheduledFireIdentity && !resignal.delivered && !resignal.published) {
+          // this process turns out to own the generation). Scheduled runs included —
+          // the stamp fences settlement, not delivery.
+          if (!resignal.delivered && !resignal.published) {
             res.set('Retry-After', '2');
             return res.status(503).json({
               error: 'Stop recorded but not yet delivered to the generation. Please retry.',
               aborted: null,
             });
+          }
+          // Delivered or republished. For a SCHEDULED run this retry never held the
+          // live-job stamp (the job was already terminal), so resolveStopAttempt
+          // no-ops — mark the abort persisted DIRECTLY: this route has no stop-side
+          // persistence pending on this path, and without the mark the generation
+          // owner's settlement barrier waits its full timeout on the ORIGINAL
+          // attempt's stamp before deferring to the reconciler.
+          if (scheduledFireIdentity && !scheduledStopStamped) {
+            await markScheduledRunAbortPersisted(
+              scheduledFireIdentity.scheduleId,
+              scheduledFireIdentity.scheduledFor,
+            ).catch((err) =>
+              logger.warn(
+                `[AgentStream] Failed to mark retry abort persisted: ${jobStreamId}`,
+                err,
+              ),
+            );
           }
           await resolveStopAttempt();
           return res.json({ success: true, aborted: jobStreamId });

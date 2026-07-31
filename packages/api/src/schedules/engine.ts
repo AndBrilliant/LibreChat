@@ -460,19 +460,27 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
     timer.unref?.();
   };
 
+  let activePass: Promise<void> | null = null;
+
   async function tick() {
     if (stopped) {
       return;
     }
-    try {
-      if (ticks % 4 === 0) {
-        await reconcile();
+    const pass = (async () => {
+      try {
+        if (ticks % 4 === 0) {
+          await reconcile();
+        }
+        ticks += 1;
+        await runTick();
+      } catch (error) {
+        logger.error('[schedules] tick failed:', error);
       }
-      ticks += 1;
-      await runTick();
-    } catch (error) {
-      logger.error('[schedules] tick failed:', error);
-    }
+    })().finally(() => {
+      activePass = null;
+    });
+    activePass = pass;
+    await pass;
     scheduleNext();
   }
 
@@ -495,14 +503,20 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
   // listener is closing and the generation manager has already begun refusing new jobs.
   // A tick in that window claims a due occurrence, fails its loopback POST against a
   // server that is shutting down, and books the failure against the schedule — walking a
-  // healthy schedule toward auto-disable for nothing more than a restart. This NARROWS
-  // that window rather than closing it: the listener starts closing before pre-drain
-  // runs, so a tick already in flight can still lose its POST. Occurrences skipped by
-  // stopping early are simply still due at restart, within the misfire grace.
+  // healthy schedule toward auto-disable for nothing more than a restart. Stopping the
+  // timer alone only narrowed the window: a pass ALREADY in flight could still claim a
+  // due occurrence and lose its loopback POST against the closing listener, so the
+  // shutdown also AWAITS the active pass — the coordinator's drain then holds the
+  // listener open until that pass's fire completes or its claim is released.
+  // Occurrences skipped by stopping early are simply still due at restart, within the
+  // misfire grace.
   registerShutdownTask(
     'schedule engine',
-    () => {
+    async () => {
       engine.stop();
+      if (activePass) {
+        await activePass;
+      }
     },
     { phase: 'pre-drain' },
   );

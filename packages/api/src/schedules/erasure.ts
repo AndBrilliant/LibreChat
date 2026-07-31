@@ -1,10 +1,22 @@
 import { logger, runAsSystem } from '@librechat/data-schemas';
-import type { ScheduleMethods } from '@librechat/data-schemas';
+import type { ScheduleMethods, IScheduleRun } from '@librechat/data-schemas';
+import type { JobState } from './types';
+import { hasResumeHandoffInFlight, hasAbortInFlight } from './types';
 import { registerShutdownTask } from '~/app/shutdown';
 
 const SWEEP_MS = 5 * 60_000;
 const SWEEP_JITTER_MS = 30_000;
 const SWEEP_BATCH = 100;
+/** Runs with no readable job older than this are presumed owner-dead (matches the
+ *  engine reconciler's orphan cutoff). */
+const ABANDONED_RUN_AGE_MS = 30 * 60_000;
+
+/** Terminal job status → the run outcome it proves (mirror of the quiesce map). */
+const TERMINAL_JOB_OUTCOMES: Record<string, 'success' | 'error' | 'interrupted' | undefined> = {
+  complete: 'success',
+  error: 'error',
+  aborted: 'interrupted',
+};
 
 export interface ScheduleErasureSweep {
   stop: () => void;
@@ -13,8 +25,83 @@ export interface ScheduleErasureSweep {
 export interface ScheduleErasureDeps {
   methods: Pick<
     ScheduleMethods,
-    'getDeletingSchedules' | 'eraseScheduleIfDrained' | 'markEraseAttempted'
+    | 'getDeletingSchedules'
+    | 'eraseScheduleIfDrained'
+    | 'markEraseAttempted'
+    | 'getActiveRunsForSchedule'
+    | 'recordRunOutcome'
   >;
+  /** Job state at a run's conversationId; null = confirmed absent, throw = unknown. */
+  getJobStatus: (conversationId: string) => Promise<JobState | null>;
+}
+
+/** Whether the observed job still carries THIS occurrence's scheduled identity. */
+function jobMatchesRun(job: JobState | null, run: IScheduleRun): boolean {
+  if (job == null || job.scheduleId !== run.scheduleId || job.scheduledFor == null) {
+    return false;
+  }
+  return new Date(job.scheduledFor).getTime() === run.scheduledFor.getTime();
+}
+
+/**
+ * Settles the abandoned active runs of a DELETING schedule so the erase below can
+ * proceed. The clustered entrypoint runs no engine reconciler, and the run TTL now
+ * (correctly) never expires active rows — so a deleting schedule whose generation
+ * owner died would otherwise retain the run and the owner's prompt indefinitely.
+ * Same evidence discipline as the quiesce paths: settle only on positive evidence
+ * (a terminal identity-matched job, or a confirmed-absent job past the owner-death
+ * cutoff), and defer anything fenced by an in-flight abort or resume hand-off.
+ */
+async function settleAbandonedRuns(deps: ScheduleErasureDeps, scheduleId: string): Promise<void> {
+  const runs = await deps.methods.getActiveRunsForSchedule(scheduleId);
+  const now = Date.now();
+  for (const run of runs) {
+    try {
+      if (hasAbortInFlight(run, now) || hasResumeHandoffInFlight(run, now)) {
+        continue;
+      }
+      const job = run.conversationId
+        ? await deps.getJobStatus(run.conversationId).then(
+            (state) => ({ known: true, state }),
+            () => ({ known: false, state: null }),
+          )
+        : { known: true, state: null };
+      if (!job.known) {
+        continue;
+      }
+      const identity = jobMatchesRun(job.state, run);
+      if (identity && job.state!.status === 'running') {
+        continue;
+      }
+      if (identity && job.state!.status === 'requires_action') {
+        // A paused run of a DELETING schedule: its approval can never be consumed,
+        // but a fresh pause hand-off may still be writing — the started-row gate
+        // and the resume fence above already deferred those; a settled-state
+        // paused row is safe to interrupt.
+        if (run.status === 'started') {
+          continue;
+        }
+      }
+      const retained = identity ? TERMINAL_JOB_OUTCOMES[job.state!.status] : undefined;
+      if (retained == null) {
+        // No terminal evidence: only presume the owner dead past the cutoff.
+        const age = now - (run.firedAt?.getTime() ?? 0);
+        if (age < ABANDONED_RUN_AGE_MS) {
+          continue;
+        }
+      }
+      await deps.methods.recordRunOutcome({
+        scheduleId: run.scheduleId,
+        scheduledFor: run.scheduledFor,
+        status: retained ?? 'interrupted',
+        conversationId: run.conversationId,
+        ...(retained == null ? { error: 'Schedule deleted' } : {}),
+        autoDisableAfterFailures: Number.MAX_SAFE_INTEGER,
+      });
+    } catch (err) {
+      logger.warn(`[schedules] abandoned-run settle failed for ${scheduleId}:`, err);
+    }
+  }
 }
 
 /**
@@ -42,6 +129,9 @@ export function startScheduleErasureSweep(deps: ScheduleErasureDeps): ScheduleEr
       await runAsSystem(async () => {
         const deleting = await deps.methods.getDeletingSchedules(SWEEP_BATCH);
         for (const schedule of deleting) {
+          await settleAbandonedRuns(deps, schedule.id).catch((err) => {
+            logger.warn(`[schedules] abandoned-run pass failed for ${schedule.id}:`, err);
+          });
           await deps.methods.eraseScheduleIfDrained(schedule.id).catch((err) => {
             logger.warn(`[schedules] erasure sweep failed for ${schedule.id}:`, err);
           });
