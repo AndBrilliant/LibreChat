@@ -568,6 +568,20 @@ export async function fireSchedule(
       return stepAsideSuperseded();
     }
 
+    // SHUTDOWN recheck immediately before dispatch: the gate before the reservation
+    // is not the last dispatch-boundary operation — the deployment-limit read,
+    // capacity allocation, and claim revalidation all run after it and can overlap
+    // SIGTERM, leaving the listener closing by the time the POST goes out. Roll the
+    // reservation back (status-fenced) and step aside without advancing: the
+    // occurrence stays due for the restarted process within the misfire grace.
+    if (deps.isShuttingDown?.() === true) {
+      logger.info(
+        `[schedules] shutdown in progress; rolling back reserved dispatch of ${schedule.id}`,
+      );
+      await rollbackReservation(conversationId);
+      return stepAsideSuperseded();
+    }
+
     try {
       await postChatMessage(
         deps,

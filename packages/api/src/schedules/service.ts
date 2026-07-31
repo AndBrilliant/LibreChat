@@ -28,6 +28,7 @@ import { fireSchedule, SCHEDULE_FIRE_TOKEN_TTL, BALANCE_SKIP_DISABLE_THRESHOLD }
 import { GenerationJobManager } from '../stream/GenerationJobManager';
 import { buildBalanceUpdateFields } from '../middleware/balance';
 import { getAppConfigOptionsFromUser } from '../app/service';
+import { isShutdownInProgress } from '../app/shutdown';
 import { startScheduleErasureSweep } from './erasure';
 import { getBalanceConfig } from '../app/config';
 import { selfOriginFromAddress } from './origin';
@@ -355,6 +356,10 @@ export function createSchedulesService(
   const engineDeps: ScheduleEngineDeps = {
     methods,
     getLimits,
+    // On the BASE deps, not only the engine's per-pass wrapper: fireScheduleNow
+    // (manual Run Now) dispatches with these deps directly, and its POST must be
+    // gated by the same coordinator signal as the engine tick's.
+    isShuttingDown: isShutdownInProgress,
     getUserContext: async (userId) => {
       const user = await deps.findUserById(userId);
       if (user == null) {

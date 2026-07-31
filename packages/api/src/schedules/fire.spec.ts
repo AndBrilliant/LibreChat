@@ -545,6 +545,27 @@ describe('fireSchedule', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
+  it('rechecks shutdown immediately before dispatch and rolls back the reservation', async () => {
+    const { methods, runs } = makeMethods();
+    // The coordinator flips AFTER the pre-reservation gate: the deployment-limit
+    // read, capacity allocation, and claim revalidation all run in between and can
+    // overlap SIGTERM. Without the recheck the POST lands on a closing listener —
+    // booked as an error (or a refused connect that advances the occurrence).
+    const isShuttingDown = jest.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    mockFetch(async () => okResponse());
+    const result = await fireSchedule(
+      makeDeps(methods, { isShuttingDown }),
+      makeSchedule(),
+      LIMITS,
+      dueAt(),
+    );
+    expect(result.skipped).toBe('superseded');
+    expect(global.fetch).not.toHaveBeenCalled();
+    // Rolled back, not advanced: the occurrence stays due for the restarted process.
+    expect(methods.advanceSchedule).not.toHaveBeenCalled();
+    expect([...runs.entries()].some(([k]) => k.startsWith('sched-1:'))).toBe(false);
+  });
+
   it('deletes the reserved run when the schedule was hard-deleted mid-fire', async () => {
     const { methods, runs } = makeMethods();
     // Account deletion hard-deleted the schedule after this fire reserved its run.

@@ -107,7 +107,11 @@ describe('Agent Abort Endpoint', () => {
     mockSaveMessage.mockReset();
     mockRecordScheduleOutcome.mockReset();
     mockRecordScheduleOutcome.mockResolvedValue(true);
+    // Re-arm after reset: the route chains `.catch` on this call, so a bare reset
+    // (implementation wiped, returns undefined) makes every test that reaches the
+    // paused-run settle throw a silent 500 after its earlier assertions passed.
     mockClearScheduledJob.mockReset();
+    mockClearScheduledJob.mockResolvedValue(undefined);
   });
 
   describe('POST /chat/abort', () => {
@@ -754,6 +758,64 @@ describe('Agent Abort Endpoint', () => {
         );
       });
 
+      it('persists the partial but keeps the stamp unresolved when the stop never left this replica', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue(scheduledJob);
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: true,
+          content: [{ type: 'text', text: 'partial' }],
+          text: 'partial',
+          jobData: {
+            status: 'running',
+            userMessage: { messageId: 'umsg-1' },
+            responseMessageId: 'resp-1',
+            conversationId: 'sched-conv',
+          },
+          signalDelivered: false,
+          signalPublished: false,
+        });
+        mockGenerationJobManager.resignalAbort.mockResolvedValueOnce({
+          delivered: false,
+          published: false,
+        });
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'sched-conv' });
+
+        // The route's writes land (the stopped response must survive a client that
+        // never retries), but an UNDELIVERED abort must keep fencing the drains:
+        // resolving the stamp here would let a deletion quiesce settle the run
+        // while the peer-owned generation is still running.
+        expect(mockSaveMessage).toHaveBeenCalled();
+        expect(mockMarkScheduledRunAbortPersisted).not.toHaveBeenCalled();
+        expect(response.status).toBe(503);
+      });
+
+      it('settles a paused run as plain success even when the abort publish failed', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue(scheduledJob);
+        // requires_action at the CAS: no generation loop is left to deliver to, so
+        // a failed publish costs nothing — answering retryable would instead leave
+        // the paused run active until reconciliation.
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: true,
+          content: [],
+          jobData: { status: 'requires_action' },
+          signalDelivered: false,
+          signalPublished: false,
+        });
+        mockRecordScheduleOutcome.mockResolvedValue(true);
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'sched-conv' });
+
+        expect(mockGenerationJobManager.resignalAbort).not.toHaveBeenCalled();
+        expect(mockRecordScheduleOutcome).toHaveBeenCalledWith(
+          expect.objectContaining({ scheduleId: 'sched-1', status: 'interrupted' }),
+        );
+        expect(response.status).toBe(200);
+      });
+
       it('acts on nothing when the abort loses the CAS to a concurrent transition', async () => {
         mockGenerationJobManager.getJob.mockResolvedValue(scheduledJob);
         // A pause->running resume (or a completion) won between abortJob's own fresh
@@ -818,6 +880,11 @@ describe('Agent Abort Endpoint', () => {
           signalDelivered: false,
           signalPublished: false,
         });
+        // The immediate republish is ALSO swallowed on this replica.
+        mockGenerationJobManager.resignalAbort.mockResolvedValueOnce({
+          delivered: false,
+          published: false,
+        });
 
         const response = await request(app)
           .post('/api/agents/chat/abort')
@@ -828,7 +895,58 @@ describe('Agent Abort Endpoint', () => {
         // would ever republish. Re-signal once and tell the client to retry.
         expect(mockGenerationJobManager.resignalAbort).toHaveBeenCalled();
         expect(response.status).toBe(503);
-        expect(mockSaveMessage).not.toHaveBeenCalled();
+      });
+
+      it('answers success when the immediate republish lands', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue(interactiveJob);
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: true,
+          content: [],
+          jobData: { status: 'running' },
+          signalDelivered: false,
+          signalPublished: false,
+        });
+        // Default resignal mock publishes: the signal left the replica after all,
+        // so discarding that outcome and answering 503 anyway would send the
+        // client through a retry loop for a stop that already landed.
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'test-conv' });
+
+        expect(mockGenerationJobManager.resignalAbort).toHaveBeenCalled();
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({ success: true });
+      });
+
+      it("persists the won abort's partial response before answering retryable", async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue(interactiveJob);
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: true,
+          content: [{ type: 'text', text: 'partial' }],
+          text: 'partial',
+          jobData: {
+            status: 'running',
+            userMessage: { messageId: 'umsg-1' },
+            responseMessageId: 'resp-1',
+            conversationId: 'test-conv',
+          },
+          signalDelivered: false,
+          signalPublished: false,
+        });
+        mockGenerationJobManager.resignalAbort.mockResolvedValueOnce({
+          delivered: false,
+          published: false,
+        });
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'test-conv' });
+
+        // A client that never retries must not permanently lose the stopped
+        // response over a transient publish failure: the won abort's persistence
+        // work runs BEFORE the retryable exit.
+        expect(mockSaveMessage).toHaveBeenCalled();
+        expect(response.status).toBe(503);
       });
 
       it('stays retryable when the terminal-branch republication also fails', async () => {

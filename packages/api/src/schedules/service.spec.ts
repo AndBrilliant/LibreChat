@@ -1,5 +1,6 @@
 import { logger } from '@librechat/data-schemas';
 import type { SchedulesServiceDeps } from './service';
+import { isShutdownInProgress } from '../app/shutdown';
 import { createSchedulesService } from './service';
 
 /** Swappable per test: null keeps the no-job-store harness the drain tests rely on. */
@@ -72,6 +73,16 @@ const run = (): ActiveRun => ({
   scheduleId: 's1',
   scheduledFor: new Date('2026-01-01T00:00:00.000Z'),
   conversationId: 'c1',
+});
+
+describe('shutdown wiring', () => {
+  it('carries the coordinator signal on the BASE deps so Run Now is gated too', async () => {
+    const service = makeService(jest.fn(async (_userId: string) => []));
+    // fireScheduleNow dispatches with engineDeps directly (not the engine's
+    // per-pass wrapper), so the shutdown gate must live on the base deps or a
+    // manual Run Now POSTs into a closing listener.
+    expect(service.engineDeps.isShuttingDown).toBe(isShutdownInProgress);
+  });
 });
 
 describe('balance initialization', () => {

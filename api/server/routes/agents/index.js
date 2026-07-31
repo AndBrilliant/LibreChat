@@ -465,26 +465,24 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
 
     // A won CAS whose cross-replica publication provably FAILED (threw/timed out)
     // means the stop never left this replica: the peer-owned generation keeps
-    // running and billing, and a client retry would land on the terminal-status
-    // branch below, which historically returned without republishing. Re-signal
-    // once and answer retryable instead of claiming success. SCHEDULED runs too:
-    // their abort stamp only fences premature settlement — it neither delivers the
-    // signal nor waits for it, so a 200 here would still leave the peer generating
-    // until the owner-death fence. The stamp stays unresolved on this exit (an
-    // undelivered abort must keep fencing the drains), and the retry never
-    // consults it: the job is already terminal, so the retry skips the live-job
-    // stamp path and lands on the terminal branch below.
+    // running and billing. Re-signal once; if that also fails, the response below
+    // stays retryable — but the won abort's persistence work (checkpoint prune,
+    // partial save) still runs first, because a client that never retries must not
+    // permanently lose the stopped response over a transient publish failure. A
+    // paused (`requires_action`) job is exempt: it has no generation loop left to
+    // deliver to, so a failed publish there costs nothing and the stop proceeds as
+    // a plain success — including its paused-run settlement.
+    let abortSignalUndelivered = false;
     if (
       abortResult.success &&
       abortResult.signalDelivered === false &&
-      abortResult.signalPublished === false
+      abortResult.signalPublished === false &&
+      abortResult.jobData?.status !== 'requires_action'
     ) {
-      await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(() => undefined);
-      res.set('Retry-After', '2');
-      return res.status(503).json({
-        error: 'Stop recorded but not yet delivered to the generation. Please retry.',
-        aborted: null,
-      });
+      const resignal = await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(
+        () => ({ delivered: false, published: false }),
+      );
+      abortSignalUndelivered = !resignal.delivered && !resignal.published;
     }
 
     // Every side effect below (checkpoint prune, partial save, settle) belongs
@@ -654,9 +652,24 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
     }
 
     // EVERY write this route makes has now landed (checkpoint prune, partial save).
-    // Stamp that durably: the GENERATION OWNER's settlement barrier waits for this
-    // stamp (see awaitStopAbortPersistence), so the run cannot leave the active set —
-    // and no deletion drain can confirm — while this route was still persisting.
+    // If the signal provably never left this replica, the peer-owned generation may
+    // still be running: the stamp stays UNRESOLVED on this exit (an undelivered
+    // abort must keep fencing the drains) and the response stays retryable. The
+    // retry finds the job terminal, republishes on the terminal branch above, and
+    // only then resolves the stamp — with nothing left to persist, since this
+    // attempt already persisted everything.
+    if (abortSignalUndelivered) {
+      res.set('Retry-After', '2');
+      return res.status(503).json({
+        error: 'Stop recorded but not yet delivered to the generation. Please retry.',
+        aborted: null,
+      });
+    }
+
+    // Stamp the persistence durably: the GENERATION OWNER's settlement barrier waits
+    // for this stamp (see awaitStopAbortPersistence), so the run cannot leave the
+    // active set — and no deletion drain can confirm — while this route was still
+    // persisting.
     await resolveStopAttempt();
 
     // SETTLE ONLY A PAUSED RUN. A run caught `requires_action` at the abort CAS has no
