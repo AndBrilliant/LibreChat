@@ -1724,6 +1724,7 @@ class GenerationJobManagerClass {
       this.releaseAbortSubscription(runtime);
     }
     runtime?.abortController.abort();
+    let abortSignalPublished = true;
     if (this.eventTransport.emitAbort) {
       try {
         await withTimeout(
@@ -1732,6 +1733,7 @@ class GenerationJobManagerClass {
           `Abort publication timed out for ${streamId}`,
         );
       } catch (err) {
+        abortSignalPublished = false;
         logger.error(`[GenerationJobManager] Failed to publish abort for ${streamId}:`, err);
       }
     }
@@ -1811,6 +1813,7 @@ class GenerationJobManagerClass {
       // exists, actually received the stop. Deletion drains gate on this; the
       // interactive route's persistence keeps gating on `success` alone.
       signalDelivered: abortSignalDelivered,
+      signalPublished: abortSignalPublished,
       jobData,
       content: abortContent,
       finalEvent: abortFinalEvent,

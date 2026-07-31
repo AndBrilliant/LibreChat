@@ -463,12 +463,44 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
       abortResultResponseMessageId: abortResult.jobData?.responseMessageId,
     });
 
+    // A won CAS whose cross-replica publication provably FAILED (threw/timed out)
+    // means the stop never left this replica: the peer-owned generation keeps
+    // running and billing, and a client retry would land on the terminal-status
+    // branch below, which historically returned without republishing. Re-signal
+    // once and answer retryable instead of claiming success. Scheduled runs are
+    // exempt: their abort stamp + reconciler fence own that guarantee, and their
+    // owner's settlement is the durable acknowledgement.
+    if (
+      abortResult.success &&
+      !scheduledFireIdentity &&
+      abortResult.signalDelivered === false &&
+      abortResult.signalPublished === false
+    ) {
+      await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(() => false);
+      res.set('Retry-After', '2');
+      return res.status(503).json({
+        error: 'Stop recorded but not yet delivered to the generation. Please retry.',
+        aborted: null,
+      });
+    }
+
     // Every side effect below (checkpoint prune, partial save, settle) belongs
     // exclusively to a WON abort. A lost CAS means a concurrent transition owns the
     // job now — a completion, or a pause→running resume whose live turn a prune
     // would strip the resume state from — so nothing here may act on it.
     if (!abortResult.success) {
       if (abortResult.jobData != null) {
+        // A job already `aborted` is a PREVIOUS Stop's win — but terminal status is
+        // not proof its publication ever left that replica. Re-publish rather than
+        // trust it (the interactive mirror of the scheduled path's resignalAbort),
+        // so the retry after a failed-publish 503 actually redelivers.
+        if (abortResult.jobData.status === 'aborted') {
+          await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(
+            () => undefined,
+          );
+          await resolveStopAttempt();
+          return res.json({ success: true, aborted: jobStreamId });
+        }
         // Lost the terminal CAS between abortJob's own fresh read and its transition:
         // a completion or a resume claimed the job. Nothing was stopped; nothing may
         // be pruned or persisted. The stop attempt is over, so resolve it — the

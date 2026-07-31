@@ -20,6 +20,7 @@ const mockLogger = {
 const mockGenerationJobManager = {
   getJob: jest.fn(),
   abortJob: jest.fn(),
+  resignalAbort: jest.fn(async () => false),
   getActiveJobIdsForUser: jest.fn(),
 };
 
@@ -800,6 +801,53 @@ describe('Agent Abort Endpoint', () => {
         // the owner barrier and reconciler stayed fenced for the stale window.
         expect(mockMarkScheduledRunAbortPersisted).toHaveBeenCalledTimes(3);
         expect(response.status).toBe(200);
+      });
+
+      const interactiveJob = {
+        status: 'running',
+        createdAt: 1000,
+        metadata: { userId: 'test-user-123' },
+      };
+
+      it('answers retryable when an interactive stop provably never left this replica', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue(interactiveJob);
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: true,
+          content: [],
+          jobData: { status: 'running' },
+          signalDelivered: false,
+          signalPublished: false,
+        });
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'test-conv' });
+
+        // The terminal CAS is durable but the publish threw: the peer-owned
+        // generation keeps running, and claiming success here left no path that
+        // would ever republish. Re-signal once and tell the client to retry.
+        expect(mockGenerationJobManager.resignalAbort).toHaveBeenCalled();
+        expect(response.status).toBe(503);
+        expect(mockSaveMessage).not.toHaveBeenCalled();
+      });
+
+      it('re-signals an already-aborted job instead of trusting terminal status', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue(interactiveJob);
+        // A previous Stop won the CAS; its publication may never have left that
+        // replica, so the retry must republish rather than return silently.
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: false,
+          content: [],
+          jobData: { status: 'aborted' },
+        });
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'test-conv' });
+
+        expect(mockGenerationJobManager.resignalAbort).toHaveBeenCalled();
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({ success: true });
       });
 
       it('answers a duplicate Stop benignly while another attempt is in flight', async () => {

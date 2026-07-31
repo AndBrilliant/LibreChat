@@ -384,6 +384,11 @@ export interface AbortResult {
    *  of consumption, so peer-owned aborts stay false — callers must treat the run
    *  settling (leaving the active set) as the durable acknowledgement instead. */
   signalDelivered?: boolean;
+  /** Whether the cross-replica abort publication left this replica: false when the
+   *  transport publish threw or timed out. Distinct from `signalDelivered` — a
+   *  successful publish to a peer-owned generation is still unconfirmed delivery,
+   *  but a FAILED publish is positive proof the stop never left this process. */
+  signalPublished?: boolean;
   /** The job data at time of abort */
   jobData: SerializableJobData | null;
   /** Aggregated content from the stream */

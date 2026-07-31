@@ -183,6 +183,32 @@ describe('auth user document cache helpers', () => {
     expect(result).toBe('tombstoned');
   });
 
+  it('unwinds its own write when the tombstone verification fails', async () => {
+    const store = makeStore();
+    const userId = new Types.ObjectId();
+    const cacheKey = 'auth-user-doc:v1:verify-failed';
+    // Entry + reverse index land, then the tombstone read throws: without the
+    // unwind the NEXT request serves this entry as a fence-conclusive cache hit
+    // without reading Mongo, admitting a pre-barrier document for the full TTL.
+    const realGet = store.get;
+    store.get = (async (key: string) => {
+      if (key.startsWith('auth-user-doc-tombstone:')) {
+        throw new Error('redis blip');
+      }
+      return realGet(key);
+    }) as typeof store.get;
+
+    const result = await setCachedAuthUserDoc(store, cacheKey, {
+      _id: userId,
+      id: userId.toString(),
+      email: 'user@example.com',
+    });
+
+    expect(result).toBe('error');
+    expect(store.values.has(cacheKey)).toBe(false);
+    expect(store.values.has(buildAuthUserDocReverseIndexKey(userId.toString()))).toBe(false);
+  });
+
   it('deduplicates reverse-index keys and caps the remembered set', async () => {
     const store = makeStore();
     const objectId = new Types.ObjectId();

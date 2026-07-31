@@ -177,8 +177,10 @@ export async function setCachedAuthUserDoc(
   cacheKey: string,
   user: Partial<IUser>,
 ): Promise<AuthUserDocCacheFillResult> {
+  const sanitized = sanitizeUserForCache(user);
+  const userId = getUserId(sanitized);
+  let entryWritten = false;
   try {
-    const sanitized = sanitizeUserForCache(user);
     await store.set(
       cacheKey,
       {
@@ -188,7 +190,7 @@ export async function setCachedAuthUserDoc(
       } satisfies CachedAuthUserDoc,
       AUTH_USER_DOC_CACHE_TTL_MS,
     );
-    const userId = getUserId(sanitized);
+    entryWritten = true;
     if (userId) {
       await rememberUserCacheKey(store, userId, cacheKey, AUTH_USER_DOC_CACHE_TTL_MS);
       // Checked AFTER the writes above, never before: the deletion barrier writes
@@ -208,6 +210,22 @@ export async function setCachedAuthUserDoc(
     logger.warn('[authUserDocCache] Cache write failed', {
       error: error instanceof Error ? error.message : String(error),
     });
+    // An entry whose tombstone verification never ran must not survive: the NEXT
+    // request would serve it as a fence-conclusive cache hit without reading
+    // Mongo, admitting a pre-barrier document for the full TTL. Best-effort —
+    // if even the unwind fails, the entry's own TTL bounds the residual, and
+    // THIS request still falls back to the durable barrier recheck ('error' is
+    // not a conclusive fence).
+    if (entryWritten) {
+      try {
+        await store.delete(cacheKey);
+        if (userId) {
+          await store.delete(buildAuthUserDocReverseIndexKey(userId));
+        }
+      } catch {
+        // TTL-bounded residual; nothing further to do.
+      }
+    }
     return 'error';
   }
 }

@@ -23,9 +23,9 @@ jest.mock('~/models', () => ({
 const jwtLogin = require('./jwtStrategy');
 const { getUserById, updateUser } = require('~/models');
 
-function invokeVerify(payload) {
+function invokeVerify(payload, req = { method: 'GET' }) {
   return new Promise((resolve, reject) => {
-    capturedVerifyCallback(payload, (err, user, info) => {
+    capturedVerifyCallback(req, payload, (err, user, info) => {
       if (err) {
         return reject(err);
       }
@@ -78,6 +78,34 @@ describe('jwtStrategy', () => {
     // job admitted here would persist messages and usage for the deleted account.
     expect(user).toBe(false);
     expect(info?.message).toMatch(/deletion/i);
+  });
+
+  it('rechecks the barrier on mutating requests and refuses when it rose after the lookup', async () => {
+    getUserById
+      // Pre-barrier snapshot returned after the barrier committed.
+      .mockResolvedValueOnce({ _id: { toString: () => 'user-4' }, role: SystemRoles.USER })
+      // The sequenced recheck observes the committed barrier.
+      .mockResolvedValueOnce({ _id: 'user-4', deletionRequestedAt: new Date() });
+
+    const { user, info } = await invokeVerify({ id: 'user-4' }, { method: 'POST' });
+
+    expect(user).toBe(false);
+    expect(info?.message).toMatch(/deletion/i);
+    expect(getUserById).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips the barrier recheck for safe methods', async () => {
+    getUserById.mockResolvedValue({
+      _id: { toString: () => 'user-5' },
+      role: SystemRoles.USER,
+    });
+
+    const { user } = await invokeVerify({ id: 'user-5' }, { method: 'GET' });
+
+    // Only writes can recreate data during the cascade; the read-heavy majority
+    // pays no extra round trip.
+    expect(user.id).toBe('user-5');
+    expect(getUserById).toHaveBeenCalledTimes(1);
   });
 
   it('returns false when no user is found', async () => {
