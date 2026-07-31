@@ -146,6 +146,11 @@ const openIdJwtLogin = (openIdConfig) => {
         }
 
         const servedCachedUser = authUserCacheMode === 'on' && cachedUser != null;
+        // Captured BEFORE the Mongo read: the cache fill stamps this as the entry's
+        // read time, and the epoch fence rejects entries whose read predates the
+        // user's latest invalidation — stamping the (later) fill time would let a
+        // mutation landing mid-read slip under its own epoch.
+        const lookupStartedAt = Date.now();
         const lookupResult = servedCachedUser
           ? { user: cachedUser, error: null, migration: false }
           : await findOpenIDUser({
@@ -218,6 +223,7 @@ const openIdJwtLogin = (openIdConfig) => {
                 authUserCacheStore,
                 authUserCacheKey,
                 user,
+                { readAt: lookupStartedAt },
               );
               // The tombstone means THIS request's Mongo read predates the deletion
               // barrier (the deletionRequestedAt check above saw a pre-barrier doc).

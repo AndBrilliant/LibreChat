@@ -1277,14 +1277,13 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         // branches clear it when their work settles, and the store TTL bounds a
         // crash between the two. Excluded: the scheduled SUCCESS path, whose
         // deferred title is awaited before settlement (never post-terminal).
-        // Registration is fail-open — deletion quiescing merely degrades to the
-        // active-set signal, and every completion must not gate on a store blip.
         const deferredTitlePostTerminal =
           shouldGenerateTitle &&
           titleTiming !== 'immediate' &&
           !(scheduleId && !wasAbortedBeforeComplete);
         const immediateTitlePending = titleTiming === 'immediate' && immediateTitlePromise != null;
         let userFinalizationRegistered = false;
+        let fallbackTitleAwaited = false;
         if (deferredTitlePostTerminal || immediateTitlePending) {
           userFinalizationRegistered = await GenerationJobManager.registerUserFinalization(
             userId,
@@ -1293,6 +1292,27 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           )
             .then(() => true)
             .catch(() => false);
+          // A FAILED registration must not proceed with neither settlement fence:
+          // completing would remove the job from the active set while the title's
+          // billed writes are still pending, and once the store recovers a deletion
+          // attempt would see no active job AND no marker — cascading mid-title.
+          // Degrade to a SYNCHRONOUS title instead: the job stays `running` (still
+          // in the active set, still deferring any quiesce) until the title settles,
+          // trading a few seconds of latency only on this rare store-blip path.
+          if (!userFinalizationRegistered) {
+            if (immediateTitlePending) {
+              await immediateTitlePromise.catch(() => undefined);
+            } else {
+              fallbackTitleAwaited = true;
+              await addTitle(req, {
+                text,
+                response: { ...response },
+                client,
+              }).catch((err) => {
+                logger.error('[ResumableAgentController] Error in title generation', err);
+              });
+            }
+          }
         }
         const clearUserFinalization = () => {
           if (!userFinalizationRegistered) {
@@ -1455,7 +1475,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           } else if (client) {
             disposeClient(client);
           }
-        } else if (shouldGenerateTitle && !scheduledTitleAwaited) {
+        } else if (shouldGenerateTitle && !scheduledTitleAwaited && !fallbackTitleAwaited) {
           addTitle(req, {
             text,
             response: { ...response },
@@ -1471,8 +1491,9 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
               }
             });
         } else {
-          // No post-terminal title actually ran on this path (e.g. the scheduled
-          // success branch awaited it); release any marker registered above.
+          // No post-terminal title ran on this path (the scheduled success branch —
+          // or the registration-failure fallback — awaited it while the job was
+          // still active); release any marker registered above.
           clearUserFinalization();
           if (client) {
             disposeClient(client);

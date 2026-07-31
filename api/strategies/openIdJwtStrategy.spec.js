@@ -461,6 +461,9 @@ describe('openIdJwtStrategy – auth user document cache', () => {
       mockAuthUserDocCacheStore,
       'auth-user-doc-key',
       expect.objectContaining({ id: 'user-abc' }),
+      // The fill stamps when the Mongo read STARTED so the epoch fence can
+      // reject entries whose read predates the user's latest invalidation.
+      expect.objectContaining({ readAt: expect.any(Number) }),
     );
     expect(invalidateCachedAuthUserDoc).not.toHaveBeenCalled();
   });

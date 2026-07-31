@@ -180,6 +180,20 @@ export class InMemoryJobStore implements IJobStore {
       syncSent: false,
     };
 
+    const replaced = this.jobs.get(streamId);
+    // A replacement can change OWNERS (the stream id is client-supplied): scrub the
+    // previous owner's membership, or their account deletion would enumerate this id
+    // and abort the new owner's live generation.
+    if (replaced && (replaced.userId !== userId || replaced.tenantId !== tenantId)) {
+      const previousKey = replaced.tenantId
+        ? `${replaced.tenantId}:${replaced.userId}`
+        : replaced.userId;
+      const previousJobs = this.userJobMap.get(previousKey);
+      previousJobs?.delete(streamId);
+      if (previousJobs?.size === 0) {
+        this.userJobMap.delete(previousKey);
+      }
+    }
     this.jobs.set(streamId, job);
     this.lastGenerationStamp.set(streamId, job.createdAt);
     this.contentState.delete(streamId);
@@ -501,17 +515,22 @@ export class InMemoryJobStore implements IJobStore {
 
     for (const streamId of trackedIds) {
       const job = this.jobs.get(streamId);
+      // OWNER check, mirroring the Redis path: a replacement can hand this stream id
+      // to a DIFFERENT user, and membership written before that must not let the
+      // previous owner's account deletion abort the new owner's live generation.
+      const belongsToUser =
+        job?.userId === userId && (job.tenantId ?? undefined) === (tenantId ?? undefined);
       // Include running jobs and jobs paused for human review (e.g. tool approval).
       // A pending-approval job still occupies the user's conversation slot — but
       // only while its prompt is live: a past-`expiresAt` approval no longer
       // counts as active (cleanup/expiry will finalize it).
-      if (job && (job.status === 'running' || job.status === 'requires_action')) {
+      if (belongsToUser && job && (job.status === 'running' || job.status === 'requires_action')) {
         if (job.status === 'requires_action' && isPendingActionStale(job)) {
           continue;
         }
         activeIds.push(streamId);
       } else {
-        // Self-healing: job completed/deleted but mapping wasn't cleaned - fix it now
+        // Self-healing: job completed/deleted/replaced but mapping wasn't cleaned - fix it now
         trackedIds.delete(streamId);
       }
     }
