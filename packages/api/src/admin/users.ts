@@ -52,6 +52,8 @@ export interface AdminUsersDeps {
    *  the quiesce is a one-shot scan, and only the barrier refuses admission to work
    *  created after it. */
   markUserDeleting: (userId: string) => Promise<Date | null>;
+  /** Commits the deletion to automatic completion; only committed rows are swept. */
+  markUserDeletionCommitted: (userId: string) => Promise<void>;
   /** Hard-deletes the user's Schedule/ScheduleRun rows. Not left to the reconciler's
    *  `deleting` sweep, which the clustered entrypoint never runs. */
   deleteSchedulesByUser: (userId: string) => Promise<void>;
@@ -70,6 +72,7 @@ export function createAdminUsersHandlers(deps: AdminUsersDeps): {
     deleteAclEntries,
     quiesceUserSchedules,
     markUserDeleting,
+    markUserDeletionCommitted,
     deleteSchedulesByUser,
   } = deps;
 
@@ -170,7 +173,27 @@ export function createAdminUsersHandlers(deps: AdminUsersDeps): {
         }
       }
 
-      // Raise the durable barrier FIRST, exactly as the self-service controller does.
+      // COMMIT to automatic completion BEFORE the barrier, exactly as the
+      // self-service controller orders it: the barrier refuses authentication, and
+      // the background sweep only finishes COMMITTED deletions — an uncommitted
+      // barrier (worker exit here, or an unretried 503 below) locked the account
+      // with its data retained indefinitely. Committed-without-barrier is inert.
+      let committed = false;
+      for (let attempt = 1; attempt <= 3 && !committed; attempt++) {
+        committed = await markUserDeletionCommitted(id).then(
+          () => true,
+          (error) => {
+            logger.error(`[adminUsers] Failed to commit deletion (attempt ${attempt}/3)`, error);
+            return false;
+          },
+        );
+      }
+      if (!committed) {
+        res.set('Retry-After', '30');
+        return res.status(503).json({ error: 'Could not start deletion. Please retry shortly.' });
+      }
+
+      // Raise the durable barrier next, exactly as the self-service controller does.
       // The quiesce below is a one-shot disable + active-run scan, so a schedule create
       // or Run Now that overlaps it can pass its own admission check, land after the
       // scan, and arm or dispatch while the user document is being removed. Only the

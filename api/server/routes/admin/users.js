@@ -20,6 +20,7 @@ const handlers = createAdminUsersHandlers({
   deleteAclEntries: db.deleteAclEntries,
   quiesceUserSchedules,
   markUserDeleting: db.markUserDeleting,
+  markUserDeletionCommitted: db.markUserDeletionCommitted,
   deleteSchedulesByUser: db.deleteSchedulesByUser,
 });
 

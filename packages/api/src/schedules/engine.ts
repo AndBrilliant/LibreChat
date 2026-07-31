@@ -402,9 +402,18 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
           return false;
         }
         try {
-          const result = await fireSchedule(deps, schedule, limits, scheduledFor, {
-            dbNow: new Date(dbNow),
-          });
+          const result = await fireSchedule(
+            // The engine's stop flag reaches the dispatch boundary: a pass in flight
+            // when shutdown begins releases its claim instead of POSTing at the
+            // closing listener.
+            { ...deps, isShuttingDown: () => stopped },
+            schedule,
+            limits,
+            scheduledFor,
+            {
+              dbNow: new Date(dbNow),
+            },
+          );
           if (result.fired) {
             fired += 1;
           }

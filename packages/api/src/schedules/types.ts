@@ -144,6 +144,8 @@ export interface ScheduleEngineDeps {
    * the conversationId but strips scheduleId/scheduledFor) before trusting the status.
    */
   getJobStatus: (conversationId: string) => Promise<JobState | null>;
+  /** True once graceful shutdown began; fires step aside instead of dispatching. */
+  isShuttingDown?: () => boolean;
   /**
    * Aborts the loopback generation for a scheduled occurrence, identity-guarded so
    * it never signals/clobbers a replacement turn that reused the conversationId.

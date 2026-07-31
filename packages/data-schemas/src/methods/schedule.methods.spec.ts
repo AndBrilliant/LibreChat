@@ -1544,6 +1544,52 @@ describe('deleteScheduleRun conversation fence', () => {
   });
 });
 
+describe('erasure leaves an idempotency tombstone', () => {
+  it('retains the create key so a late retry cannot resurrect deleted work', async () => {
+    const user = new mongoose.Types.ObjectId();
+    const schedule = await methods.createSchedule(
+      scheduleData({
+        user,
+        deleting: true,
+        nextRunAt: undefined,
+        clientRequestId: 'late-retry-key',
+        clientRequestDigest: 'digest-1',
+      }),
+    );
+
+    await expect(methods.eraseScheduleIfDrained(schedule.id)).resolves.toBe(true);
+
+    // The content is gone, the identity is not: a create retry with this key must
+    // resolve to the tombstone (the handler answers 410 on deleting rows) instead
+    // of missing entirely and recreating the recurring work the owner deleted.
+    const tombstone = await methods.getScheduleByClientRequestId(user, 'late-retry-key');
+    expect(tombstone).not.toBeNull();
+    expect(tombstone?.erased).toBe(true);
+    expect(tombstone?.deleting).toBe(true);
+    expect(tombstone?.clientRequestDigest).toBe('digest-1');
+    expect(tombstone?.prompt).toBeUndefined();
+    expect(tombstone?.name).toBeUndefined();
+
+    // Tombstones are inert to every sweep: re-erasing or re-deleting them forever
+    // would pin the bounded windows.
+    const sweepRows = await methods.getDeletingSchedules(50);
+    expect(sweepRows.some((row) => row.id === schedule.id)).toBe(false);
+    const retryIds = await methods.getDeletingScheduleIds(user, 50);
+    expect(retryIds).not.toContain(schedule.id);
+  });
+
+  it('hard-deletes rows that never carried a create key', async () => {
+    const user = new mongoose.Types.ObjectId();
+    const schedule = await methods.createSchedule(
+      scheduleData({ user, deleting: true, nextRunAt: undefined }),
+    );
+
+    await expect(methods.eraseScheduleIfDrained(schedule.id)).resolves.toBe(true);
+    const gone = await mongoose.models.Schedule.findOne({ id: schedule.id }).lean();
+    expect(gone).toBeNull();
+  });
+});
+
 describe('deletion quiescing (soft-delete, drain, erase)', () => {
   it('markScheduleDeleting hides + un-claims; erase waits for active runs to drain', async () => {
     const schedule = await methods.createScheduleWithSlot(scheduleData(), 10);

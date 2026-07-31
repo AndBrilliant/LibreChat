@@ -61,6 +61,7 @@ function createDeps(overrides: Partial<AdminUsersDeps> = {}): AdminUsersDeps {
     deleteAclEntries: jest.fn().mockResolvedValue(undefined),
     quiesceUserSchedules: jest.fn().mockResolvedValue(true),
     markUserDeleting: jest.fn().mockResolvedValue(new Date()),
+    markUserDeletionCommitted: jest.fn().mockResolvedValue(undefined),
     deleteSchedulesByUser: jest.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -511,6 +512,27 @@ describe('createAdminUsersHandlers', () => {
       const barrier = (deps.markUserDeleting as jest.Mock).mock.invocationCallOrder[0];
       const quiesce = (deps.quiesceUserSchedules as jest.Mock).mock.invocationCallOrder[0];
       expect(barrier).toBeLessThan(quiesce);
+      // COMMITMENT precedes the barrier: the barrier refuses authentication and the
+      // sweep only finishes committed deletions, so an uncommitted barrier (worker
+      // exit, unretried 503) locked the account with its data retained forever.
+      const committed = (deps.markUserDeletionCommitted as jest.Mock).mock.invocationCallOrder[0];
+      expect(committed).toBeLessThan(barrier);
+    });
+
+    it('refuses the delete when the commitment cannot be recorded', async () => {
+      const deps = createDeps({
+        markUserDeletionCommitted: jest.fn().mockRejectedValue(new Error('mongo down')),
+      });
+      const handlers = createAdminUsersHandlers(deps);
+      const { req, res, status } = createReqRes({ params: { id: validUserId } });
+
+      await handlers.deleteUser(req, res);
+
+      expect(status).toHaveBeenCalledWith(503);
+      // A barrier without a commitment is the unrecoverable lockout; refusing before
+      // the barrier leaves the account fully functional for a clean retry.
+      expect(deps.markUserDeleting).not.toHaveBeenCalled();
+      expect(deps.deleteUserById).not.toHaveBeenCalled();
     });
 
     it('refuses the delete when the barrier cannot be raised', async () => {

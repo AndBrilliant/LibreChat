@@ -118,6 +118,15 @@ const scheduleSchema: Schema<IScheduleDocument> = new Schema(
       type: Boolean,
       default: false,
     },
+    /** Erased tombstone: content is gone, only the create-idempotency identity
+     *  remains for a bounded retry window (TTL below). A delayed create retry that
+     *  matches this key must answer "deleted", not resurrect the recurring work. */
+    erased: {
+      type: Boolean,
+    },
+    erasedAt: {
+      type: Date,
+    },
     /**
      * Per-user occupancy slot in [0, maxPerUser). Assigned atomically via the
      * partial unique index below so concurrent creates cannot exceed the cap: two
@@ -196,6 +205,11 @@ const scheduleSchema: Schema<IScheduleDocument> = new Schema(
   },
 );
 
+// Idempotency tombstones expire after the bounded retry window; live rows never match.
+scheduleSchema.index(
+  { erasedAt: 1 },
+  { expireAfterSeconds: 24 * 60 * 60, partialFilterExpression: { erased: true } },
+);
 scheduleSchema.index({ id: 1, tenantId: 1 }, { unique: true });
 scheduleSchema.index({ enabled: 1, nextRunAt: 1 });
 // Atomic per-user create cap: a live (non-deleting) schedule occupies a unique

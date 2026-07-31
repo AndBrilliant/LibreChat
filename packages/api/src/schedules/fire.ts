@@ -161,9 +161,12 @@ async function postChatMessageInner(
     // (reset after send, request timeout) is genuinely ambiguous: the generation may
     // already be running, so leave the run reconcilable.
     const message = error instanceof Error ? error.message : String(error);
+    // During shutdown a refused connection is the CLOSING listener, not a broken
+    // SCHEDULES_SELF_URL: classify it ambiguous so the row stays reconcilable and
+    // no failure is booked against the schedule for a restart.
     throw new ScheduleFireError(
       `Fire POST network failure: ${message}`,
-      !isDefiniteConnectFailure(error),
+      !isDefiniteConnectFailure(error) || deps.isShuttingDown?.() === true,
     );
   }
   if (!response.ok) {
@@ -432,6 +435,17 @@ export async function fireSchedule(
       claimToken != null &&
       !(await methods.revalidateClaim(schedule.id, claimToken, !options?.manual))
     ) {
+      return stepAsideSuperseded();
+    }
+
+    // SHUTDOWN gate at the dispatch boundary: the coordinator closes the listener
+    // BEFORE the engine's pre-drain task runs, so a pass already past its preflight
+    // would POST at a refusing socket — a definite connect failure that terminalizes
+    // as `error` and walks a healthy schedule toward auto-disable for nothing more
+    // than a restart. Nothing is reserved yet, so stepping aside leaves the
+    // occurrence due for the restarted process (within the misfire grace).
+    if (deps.isShuttingDown?.() === true) {
+      logger.info(`[schedules] shutdown in progress; releasing claim on ${schedule.id}`);
       return stepAsideSuperseded();
     }
 

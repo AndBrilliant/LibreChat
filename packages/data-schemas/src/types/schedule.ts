@@ -28,6 +28,8 @@ export interface ISchedule {
   /** Owner-config generation; bumped only by an owner edit. */
   configRevision?: number;
   deleting?: boolean;
+  erased?: boolean;
+  erasedAt?: Date;
   slot?: number;
   /** Client-supplied idempotency key of the create that produced this row. */
   clientRequestId?: string;

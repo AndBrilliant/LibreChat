@@ -1530,7 +1530,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
    *  leases) starved every row behind it out of the sweep indefinitely. */
   async function getDeletingSchedules(limit: number): Promise<ISchedule[]> {
     return Schedule()
-      .find({ deleting: true })
+      .find({ deleting: true, erased: { $ne: true } })
       .sort({ eraseAttemptedAt: 1 })
       .limit(limit)
       .lean<ISchedule[]>();
@@ -1572,7 +1572,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
     // the ones beyond it never get their deletion re-driven. Callers stamp
     // markEraseAttempted after each attempt to rotate the window.
     const rows = await Schedule()
-      .find({ user: userId, deleting: true })
+      .find({ user: userId, deleting: true, erased: { $ne: true } })
       .sort({ eraseAttemptedAt: 1 })
       .select('id')
       .limit(limit)
@@ -1614,7 +1614,37 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
       return false;
     }
     await ScheduleRun().deleteMany({ scheduleId: id });
-    await Schedule().deleteOne({ id, deleting: true });
+    // Rows carrying a create-idempotency key leave a content-free TOMBSTONE instead
+    // of vanishing: a create whose response was lost retries with the same key, and
+    // if the owner deleted the schedule before that retry arrived, a hard delete
+    // would let the retry recreate the recurring work they just removed. The
+    // tombstone keeps only the identity fields (key, digest, owner) for a bounded
+    // window (TTL on erasedAt); the replay path answers "deleted" against it.
+    const tombstoned = await Schedule().updateOne(
+      { id, deleting: true, clientRequestId: { $exists: true } },
+      {
+        $set: { erased: true, erasedAt: new Date(), enabled: false },
+        $unset: {
+          name: 1,
+          prompt: 1,
+          agent_id: 1,
+          cadence: 1,
+          timezone: 1,
+          file_ids: 1,
+          lastRun: 1,
+          nextRunAt: 1,
+          leaseUntil: 1,
+          leaseBy: 1,
+          disabledReason: 1,
+          countedFor: 1,
+        },
+        // Not a config edit; the tombstone must not surface in updated-time listings.
+      },
+      { timestamps: false },
+    );
+    if (tombstoned.matchedCount === 0) {
+      await Schedule().deleteOne({ id, deleting: true });
+    }
     return true;
   }
 

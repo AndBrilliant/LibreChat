@@ -10,6 +10,7 @@ const {
   getOpenIdIssuer,
   normalizeOpenIdIssuer,
   buildAuthUserDocCacheKey,
+  buildAuthUserDocTombstoneKey,
   getAuthUserDocCacheMode,
   getCachedAuthUserDoc,
   invalidateCachedAuthUserDoc,
@@ -116,10 +117,33 @@ const openIdJwtLogin = (openIdConfig) => {
         const authUserCacheMode = getAuthUserDocCacheMode();
         const authUserCacheStore =
           authUserCacheMode !== 'off' && authUserCacheKey ? getAuthUserDocCacheStore() : undefined;
-        const cachedUser =
+        let cachedUser =
           authUserCacheMode !== 'off' && authUserCacheStore && authUserCacheKey
             ? await getCachedAuthUserDoc(authUserCacheStore, authUserCacheKey)
             : undefined;
+        // A hit is only a conclusive deletion fence if the user's tombstone is
+        // ABSENT: the barrier stamps Mongo, writes the tombstone, then sweeps keys,
+        // so a hit read in the stamp-to-sweep window would otherwise authenticate a
+        // pre-barrier document during the cascade. A tombstoned hit falls through
+        // to the fresh lookup, whose own checks refuse the barriered user. Costs
+        // one extra cache read per hit; entries expire in seconds, so past the
+        // tombstone's window a hit cannot be pre-barrier.
+        if (cachedUser != null && authUserCacheStore) {
+          const cachedUserId = cachedUser._id ?? cachedUser.id;
+          const tombstoned =
+            cachedUserId != null
+              ? await authUserCacheStore
+                  .get(buildAuthUserDocTombstoneKey(String(cachedUserId)))
+                  .catch(() => true)
+              : true;
+          if (tombstoned != null && tombstoned !== false) {
+            await invalidateCachedAuthUserDoc(authUserCacheStore, {
+              userId: cachedUserId != null ? String(cachedUserId) : undefined,
+              cacheKey: authUserCacheKey,
+            });
+            cachedUser = undefined;
+          }
+        }
 
         const servedCachedUser = authUserCacheMode === 'on' && cachedUser != null;
         const lookupResult = servedCachedUser
