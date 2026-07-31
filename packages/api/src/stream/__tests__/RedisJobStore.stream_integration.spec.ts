@@ -388,6 +388,34 @@ describe('RedisJobStore Integration Tests', () => {
     });
   });
 
+  describe('User Finalization Markers', () => {
+    test('registers, counts, and clears owner finalizations across store instances', async () => {
+      if (!ioredisClient) {
+        return;
+      }
+
+      const { RedisJobStore } = await import('../implementations/RedisJobStore');
+      const owner = new RedisJobStore(ioredisClient);
+      // A SECOND instance reads the marker — the deletion quiesce can run on a
+      // different replica than the generation owner, and the marker must be
+      // visible there (this is what makes the acknowledgement durable).
+      const peer = new RedisJobStore(ioredisClient);
+      await owner.initialize();
+      await peer.initialize();
+      const userId = `final-user-${Date.now()}`;
+
+      await owner.registerUserFinalization(userId, 'conv-final-1', 'tenant-x');
+      await expect(peer.countUserFinalizations(userId, 'tenant-x')).resolves.toBe(1);
+      await expect(peer.countUserFinalizations(userId)).resolves.toBe(0);
+
+      await owner.clearUserFinalization(userId, 'conv-final-1', 'tenant-x');
+      await expect(peer.countUserFinalizations(userId, 'tenant-x')).resolves.toBe(0);
+
+      await owner.destroy();
+      await peer.destroy();
+    });
+  });
+
   describe('Requires Action Status Tracking', () => {
     test('should count requires_action jobs and remove them from the running set', async () => {
       if (!ioredisClient) {

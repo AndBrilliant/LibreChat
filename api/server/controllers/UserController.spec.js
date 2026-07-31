@@ -316,6 +316,7 @@ describe('deleteUserController', () => {
     status: jest.fn().mockReturnThis(),
     send: jest.fn().mockReturnThis(),
     json: jest.fn().mockReturnThis(),
+    set: jest.fn().mockReturnThis(),
   };
 
   beforeEach(() => {

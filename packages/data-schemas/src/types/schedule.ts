@@ -76,6 +76,8 @@ export interface IScheduleRun {
   droppedFileIds?: string[];
   durationMs?: number;
   bookkept?: boolean;
+  /** Set only by terminal writes; the retention TTL index expires on this field. */
+  settledAt?: Date;
   /** Global concurrency slot held while `started`. */
   capacitySlot?: number;
   /** When an abort was requested; capacity is held until settlement is confirmed. */

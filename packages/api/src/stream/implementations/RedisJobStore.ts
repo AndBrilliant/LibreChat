@@ -490,6 +490,11 @@ const KEYS = {
   /** User's active jobs set, tenant-qualified when tenantId is available */
   userJobs: (userId: string, tenantId?: string) =>
     tenantId ? `stream:user:{${tenantId}:${userId}}:jobs` : `stream:user:{${userId}}:jobs`,
+  /** Hash of the user's owner finalizations still landing (field=streamId, value=expiry ms) */
+  userFinalizations: (userId: string, tenantId?: string) =>
+    tenantId
+      ? `stream:user:{${tenantId}:${userId}}:finalizing`
+      : `stream:user:{${userId}}:finalizing`,
   /** Idempotency claim for a start-generation request: stream:idem:{userId:clientRequestId} */
   idempotency: (key: string) => `stream:idem:{${key}}`,
 };
@@ -498,6 +503,10 @@ const KEYS = {
  * Default TTL values in seconds.
  * Can be overridden via constructor options.
  */
+/** Backstop for a finalization whose owner crashed between register and clear:
+ *  deletion quiescing defers on live markers, so they must age out. */
+const USER_FINALIZATION_TTL_MS = 5 * 60 * 1000;
+
 const DEFAULT_TTL = {
   /** TTL for completed jobs (5 minutes) */
   completed: 300,
@@ -1472,6 +1481,44 @@ export class RedisJobStore implements IJobStore {
     }
 
     return activeIds;
+  }
+
+  async registerUserFinalization(
+    userId: string,
+    streamId: string,
+    tenantId?: string,
+  ): Promise<void> {
+    const key = KEYS.userFinalizations(userId, tenantId);
+    const expiresAt = Date.now() + USER_FINALIZATION_TTL_MS;
+    await this.redis.hset(key, streamId, String(expiresAt));
+    // Key-level TTL as the crash backstop; per-field expiry is enforced on read.
+    await this.redis.expire(key, Math.ceil(USER_FINALIZATION_TTL_MS / 1000));
+  }
+
+  async clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void> {
+    await this.redis.hdel(KEYS.userFinalizations(userId, tenantId), streamId);
+  }
+
+  async countUserFinalizations(userId: string, tenantId?: string): Promise<number> {
+    const key = KEYS.userFinalizations(userId, tenantId);
+    const entries = await this.redis.hgetall(key);
+    if (entries == null) {
+      return 0;
+    }
+    const now = Date.now();
+    let live = 0;
+    const stale: string[] = [];
+    for (const [streamId, expiresAt] of Object.entries(entries)) {
+      if (Number(expiresAt) > now) {
+        live++;
+      } else {
+        stale.push(streamId);
+      }
+    }
+    if (stale.length > 0) {
+      await this.redis.hdel(key, ...stale).catch(() => undefined);
+    }
+    return live;
   }
 
   async destroy(): Promise<void> {

@@ -561,6 +561,22 @@ export interface IJobStore {
    */
   getActiveJobIdsByUser(userId: string, tenantId?: string): Promise<string[]>;
 
+  /**
+   * Register a pending user-visible FINALIZATION: persistence the generation owner
+   * still has to land (e.g. a deferred title's billed balance/transaction writes)
+   * AFTER its job leaves the active set. Account-deletion quiescing consults these
+   * — an empty active-set enumeration is not settlement while one is outstanding.
+   * TTL-bounded in the store so a crash between register and clear can only fence
+   * deletion for the TTL, never forever.
+   */
+  registerUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void>;
+
+  /** Clear a finalization registered by {@link registerUserFinalization}. */
+  clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void>;
+
+  /** Count live (unexpired) finalizations for a user. */
+  countUserFinalizations(userId: string, tenantId?: string): Promise<number>;
+
   // ===== Content State Methods =====
   // These methods manage volatile content state tied to each job.
   // In-memory: Uses WeakRef to graph for live access

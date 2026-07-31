@@ -44,6 +44,7 @@ jest.mock('@librechat/api', () => ({
   GenerationJobManager: {
     getActiveJobIdsForUser: jest.fn(async () => []),
     abortJob: jest.fn(async () => ({ success: true })),
+    countUserFinalizations: jest.fn(async () => 0),
   },
   deleteAllSharedLinksWithCleanup: (...args) => mockDeleteAllSharedLinksWithCleanup(...args),
 }));
@@ -328,6 +329,21 @@ describe('deleteUserController - interactive generation quiesce', () => {
     // deferred to the sweep — the barrier and commitment are already durable.
     expect(GenerationJobManager.abortJob).toHaveBeenCalledWith('conv-live');
     expect(res.set).toHaveBeenCalledWith('Retry-After', '30');
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockDeleteMessages).not.toHaveBeenCalled();
+    expect(mockDeleteUserById).not.toHaveBeenCalled();
+  });
+
+  it('defers while an owner finalization (deferred title) is still landing', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    // Active set already empty — the job completed — but the owner's deferred
+    // title (billed balance/transaction writes) has not settled yet.
+    GenerationJobManager.countUserFinalizations.mockResolvedValueOnce(1);
+
+    await deleteUserController(req, res);
+
     expect(res.status).toHaveBeenCalledWith(503);
     expect(mockDeleteMessages).not.toHaveBeenCalled();
     expect(mockDeleteUserById).not.toHaveBeenCalled();

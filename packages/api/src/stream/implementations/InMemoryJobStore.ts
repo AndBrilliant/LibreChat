@@ -27,6 +27,9 @@ export const PARKED_STEERS_TTL_MS: number = 5 * 60 * 1000;
 /** How long a stream's generation stamp is remembered after its job is gone (24h,
  *  matching RedisJobStore's generation-key TTL). */
 const GENERATION_STAMP_RETENTION_MS = 24 * 60 * 60 * 1000;
+/** Backstop for a finalization whose owner crashed between register and clear:
+ *  deletion quiescing defers on live markers, so they must age out. */
+const USER_FINALIZATION_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Content state for a job - volatile, in-memory only.
@@ -54,6 +57,8 @@ export class InMemoryJobStore implements IJobStore {
 
   /** Maps userId -> Set of streamIds (conversationIds) for active jobs */
   private userJobMap = new Map<string, Set<string>>();
+  /** userKey -> (streamId -> expiry ms) of owner finalizations still landing. */
+  private userFinalizations = new Map<string, Map<string, number>>();
 
   /**
    * Maps streamId -> last generation-activity timestamp. Refreshed via
@@ -517,6 +522,51 @@ export class InMemoryJobStore implements IJobStore {
     }
 
     return activeIds;
+  }
+
+  async registerUserFinalization(
+    userId: string,
+    streamId: string,
+    tenantId?: string,
+  ): Promise<void> {
+    const userKey = tenantId ? `${tenantId}:${userId}` : userId;
+    let entries = this.userFinalizations.get(userKey);
+    if (!entries) {
+      entries = new Map();
+      this.userFinalizations.set(userKey, entries);
+    }
+    entries.set(streamId, Date.now() + USER_FINALIZATION_TTL_MS);
+  }
+
+  async clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void> {
+    const userKey = tenantId ? `${tenantId}:${userId}` : userId;
+    const entries = this.userFinalizations.get(userKey);
+    if (!entries) {
+      return;
+    }
+    entries.delete(streamId);
+    if (entries.size === 0) {
+      this.userFinalizations.delete(userKey);
+    }
+  }
+
+  async countUserFinalizations(userId: string, tenantId?: string): Promise<number> {
+    const userKey = tenantId ? `${tenantId}:${userId}` : userId;
+    const entries = this.userFinalizations.get(userKey);
+    if (!entries) {
+      return 0;
+    }
+    const now = Date.now();
+    for (const [streamId, expiresAt] of entries) {
+      if (expiresAt <= now) {
+        entries.delete(streamId);
+      }
+    }
+    if (entries.size === 0) {
+      this.userFinalizations.delete(userKey);
+      return 0;
+    }
+    return entries.size;
   }
 
   // ===== Content State Methods =====

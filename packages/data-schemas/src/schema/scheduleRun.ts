@@ -64,6 +64,11 @@ const scheduleRunSchema: Schema<IScheduleRunDocument> = new Schema(
     bookkept: {
       type: Boolean,
     },
+    /** Set ONLY when the row reaches a terminal status; the TTL index below expires on
+     *  this field, so live rows (which never carry it) never expire. */
+    settledAt: {
+      type: Date,
+    },
     /** Global concurrency slot held while `started`. The unique partial index below
      *  turns fireConcurrency into a DB-enforced bound instead of a racy count. */
     capacitySlot: {
@@ -106,17 +111,13 @@ scheduleRunSchema.index({ scheduleId: 1, scheduledFor: 1 }, { unique: true });
 // TTL retention applies only to SETTLED rows: an approval window configured longer
 // than the retention period would otherwise let Mongo expire a still-live
 // `requires_action` run — its retained job could then resume with no run row (no
-// bookkeeping), and deletion quiescing could no longer discover or abort it. TTL
-// indexes accept partialFilterExpression, so active rows simply never expire.
-scheduleRunSchema.index(
-  { firedAt: 1 },
-  {
-    expireAfterSeconds: SCHEDULE_RUN_TTL_SECONDS,
-    partialFilterExpression: {
-      status: { $in: ['success', 'error', 'interrupted', 'skipped_overlap', 'skipped_balance'] },
-    },
-  },
-);
+// bookkeeping), and deletion quiescing could no longer discover or abort it.
+// Expressed as a PLAIN TTL index on `settledAt` (stamped only by terminal writes):
+// TTL expiry skips documents that lack the indexed date, so live rows never expire
+// without needing a partialFilterExpression — whose `$in` predicate Amazon
+// DocumentDB 5.0 cannot build (misc/documentdb/documentdb-compat.md), which would
+// leave initializeScheduleEngine refusing to arm on that target.
+scheduleRunSchema.index({ settledAt: 1 }, { expireAfterSeconds: SCHEDULE_RUN_TTL_SECONDS });
 // At most ONE active (`started`) run per schedule, enforced by the DB rather than a
 // read-then-write check: a second occurrence inserting while one is already active
 // fails with a duplicate-key error instead of racing.

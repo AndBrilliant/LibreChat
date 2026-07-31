@@ -1269,6 +1269,43 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           logger.warn(`[ResumableAgentController] Failed to drain leftover steers`, err);
         }
 
+        // OWNER-SIDE persistence acknowledgement for account deletion: the title
+        // branches below can persist billed work (a balance upsert + a transaction
+        // insert) AFTER completeJob removes this job from the active set, so an
+        // empty active-set enumeration is not settlement. Register the marker while
+        // the job is still active (no gap for a quiesce to slip through); the title
+        // branches clear it when their work settles, and the store TTL bounds a
+        // crash between the two. Excluded: the scheduled SUCCESS path, whose
+        // deferred title is awaited before settlement (never post-terminal).
+        // Registration is fail-open — deletion quiescing merely degrades to the
+        // active-set signal, and every completion must not gate on a store blip.
+        const deferredTitlePostTerminal =
+          shouldGenerateTitle &&
+          titleTiming !== 'immediate' &&
+          !(scheduleId && !wasAbortedBeforeComplete);
+        const immediateTitlePending = titleTiming === 'immediate' && immediateTitlePromise != null;
+        let userFinalizationRegistered = false;
+        if (deferredTitlePostTerminal || immediateTitlePending) {
+          userFinalizationRegistered = await GenerationJobManager.registerUserFinalization(
+            userId,
+            streamId,
+            req.user?.tenantId,
+          )
+            .then(() => true)
+            .catch(() => false);
+        }
+        const clearUserFinalization = () => {
+          if (!userFinalizationRegistered) {
+            return;
+          }
+          userFinalizationRegistered = false;
+          void GenerationJobManager.clearUserFinalization(
+            userId,
+            streamId,
+            req.user?.tenantId,
+          ).catch(() => undefined);
+        };
+
         if (!wasAbortedBeforeComplete) {
           const finalEvent = {
             final: true,
@@ -1410,6 +1447,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           // so the run/req aren't torn down mid-generation.
           if (immediateTitlePromise) {
             immediateTitlePromise.finally(() => {
+              clearUserFinalization();
               if (client) {
                 disposeClient(client);
               }
@@ -1427,11 +1465,15 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
               logger.error('[ResumableAgentController] Error in title generation', err);
             })
             .finally(() => {
+              clearUserFinalization();
               if (client) {
                 disposeClient(client);
               }
             });
         } else {
+          // No post-terminal title actually ran on this path (e.g. the scheduled
+          // success branch awaited it); release any marker registered above.
+          clearUserFinalization();
           if (client) {
             disposeClient(client);
           }

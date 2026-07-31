@@ -217,6 +217,46 @@ describe('recordSkippedRun duplicate-occurrence guard', () => {
   });
 });
 
+describe('settledAt retention marker', () => {
+  it('stamps settledAt on terminal outcomes but never on a pause', async () => {
+    const schedule = await methods.createSchedule(scheduleData());
+    const when = new Date('2026-07-20T12:00:00Z');
+    await methods.reserveStartedRun(runData(schedule, { scheduledFor: when }));
+
+    // The retention TTL index expires on `settledAt`, so a PAUSE must not carry it:
+    // an approval window longer than the retention period would otherwise let Mongo
+    // reap a still-live requires_action row out from under its retained job.
+    await methods.recordRunOutcome({
+      scheduleId: schedule.id,
+      scheduledFor: when,
+      status: 'requires_action',
+    });
+    expect((await getRun(schedule.id, when)).settledAt).toBeUndefined();
+
+    await methods.recordRunOutcome({
+      scheduleId: schedule.id,
+      scheduledFor: when,
+      status: 'success',
+    });
+    expect((await getRun(schedule.id, when)).settledAt).toBeInstanceOf(Date);
+  });
+
+  it('stamps settledAt on skip rows inserted terminal', async () => {
+    const schedule = await methods.createSchedule(scheduleData());
+    const when = new Date('2026-07-20T12:00:00Z');
+    await methods.recordSkippedRun(
+      {
+        scheduleId: schedule.id,
+        user: schedule.user,
+        scheduledFor: when,
+        status: 'skipped_overlap',
+      },
+      5,
+    );
+    expect((await getRun(schedule.id, when)).settledAt).toBeInstanceOf(Date);
+  });
+});
+
 describe('reserveStartedRun (single-active overlap guard)', () => {
   it('reserves the slot, then rejects a concurrent occurrence as overlap', async () => {
     const schedule = await methods.createSchedule(scheduleData());

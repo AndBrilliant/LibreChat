@@ -1170,6 +1170,7 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
           $set: {
             status: params.status,
             bookkept: false,
+            settledAt: firedAt,
             ...(params.conversationId && !params.clearConversationId
               ? { conversationId: params.conversationId }
               : {}),
@@ -1235,7 +1236,12 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
     // replayed by the reconciler (getUnbookkeptRuns), exactly like a terminal run —
     // a duplicate claim of this occurrence advances past the terminal row without
     // re-running bookkeeping, so nothing else would ever repair a half-applied skip.
-    const inserted = await insertScheduleRun({ ...data, firedAt, bookkept: false });
+    const inserted = await insertScheduleRun({
+      ...data,
+      firedAt,
+      settledAt: firedAt,
+      bookkept: false,
+    });
     let rowRevision = inserted?.configRevision;
     let rowFiredAt = firedAt;
     if (inserted == null) {

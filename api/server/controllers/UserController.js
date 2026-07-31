@@ -473,15 +473,32 @@ const deleteUserController = async (req, res) => {
  */
 const quiesceInteractiveGenerations = async (user) => {
   const activeJobIds = await GenerationJobManager.getActiveJobIdsForUser(user.id, user.tenantId);
-  if (!activeJobIds?.length) {
-    return true;
+  if (activeJobIds?.length) {
+    for (const streamId of activeJobIds) {
+      await GenerationJobManager.abortJob(streamId).catch((err) =>
+        logger.warn(`[quiesceInteractiveGenerations] Failed to abort active job ${streamId}`, err),
+      );
+    }
+    return false;
   }
-  for (const streamId of activeJobIds) {
-    await GenerationJobManager.abortJob(streamId).catch((err) =>
-      logger.warn(`[quiesceInteractiveGenerations] Failed to abort active job ${streamId}`, err),
+  // OWNER-SIDE persistence acknowledgement: an empty active set alone is not
+  // settlement — the success path completes its job fire-and-forget and then runs
+  // the deferred title, whose billed balance/transaction writes land AFTER the job
+  // left the set. The owner registers a TTL-bounded finalization marker before its
+  // terminal transition and clears it when that work settles; any live marker
+  // defers the cascade. Multi-replica deployments require the Redis job store
+  // (see isTopologySafeToArm), where these markers are cross-replica visible.
+  const pendingFinalizations = await GenerationJobManager.countUserFinalizations(
+    user.id,
+    user.tenantId,
+  );
+  if (pendingFinalizations > 0) {
+    logger.info(
+      `[quiesceInteractiveGenerations] ${pendingFinalizations} owner finalization(s) still landing for ${user.id}`,
     );
+    return false;
   }
-  return false;
+  return true;
 };
 
 /**

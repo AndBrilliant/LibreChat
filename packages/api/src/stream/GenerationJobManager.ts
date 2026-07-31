@@ -4165,6 +4165,23 @@ class GenerationJobManagerClass {
     return this.jobStore.getActiveJobIdsByUser(userId, tenantId);
   }
 
+  /** Owner-side persistence acknowledgement (see IJobStore.registerUserFinalization). */
+  async registerUserFinalization(
+    userId: string,
+    streamId: string,
+    tenantId?: string,
+  ): Promise<void> {
+    return this.jobStore.registerUserFinalization(userId, streamId, tenantId);
+  }
+
+  async clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void> {
+    return this.jobStore.clearUserFinalization(userId, streamId, tenantId);
+  }
+
+  async countUserFinalizations(userId: string, tenantId?: string): Promise<number> {
+    return this.jobStore.countUserFinalizations(userId, tenantId);
+  }
+
   private async finalizeOwnedJobsForShutdown(): Promise<void> {
     const ownedJobs = [...this.ownedJobs];
     if (ownedJobs.length === 0) {

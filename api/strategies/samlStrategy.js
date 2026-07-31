@@ -292,6 +292,25 @@ function createSamlCallback(existingUsersOnly = false) {
 
       user = await updateUser(user._id, user);
 
+      // FINAL barrier recheck at the successful-login boundary, sequenced after the
+      // slow awaits above (config resolution, avatar download/save, user sync): a
+      // barrier raised mid-callback would otherwise mint a session whose downstream
+      // login middleware recreates a Balance and Session behind the destructive
+      // cascade. A null read fails closed — an identity removed mid-flow must not
+      // complete.
+      let barrier = null;
+      try {
+        barrier = await findUser({ _id: user._id }, 'deletionRequestedAt');
+      } catch {
+        barrier = null;
+      }
+      if (barrier == null || barrier.deletionRequestedAt != null) {
+        logger.warn(
+          `[samlStrategy] Refusing login for ${user._id}: deletion barrier raised or unverifiable`,
+        );
+        return done(null, false, { message: ErrorTypes.AUTH_FAILED });
+      }
+
       logger.info(
         `[samlStrategy] Login success SAML ID: ${user.samlId} | email: ${user.email} | username: ${user.username}`,
         {
