@@ -413,9 +413,9 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
     // every subsequent Stop answer 'in_progress' — a false success that retries
     // nothing — while fencing the owner's settlement barrier and the reconciler
     // for the full stale window. One transient Mongo failure must not buy all that.
-    const resolveStopAttempt = async () => {
-      if (!scheduledStopStamped || !scheduledFireIdentity) {
-        return;
+    const stampAbortPersistedWithRetries = async () => {
+      if (!scheduledFireIdentity) {
+        return true;
       }
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -423,7 +423,7 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
             scheduledFireIdentity.scheduleId,
             scheduledFireIdentity.scheduledFor,
           );
-          return;
+          return true;
         } catch (err) {
           logger.error(
             `[AgentStream] Failed to stamp abort persistence (attempt ${attempt}/3): ${jobStreamId}`,
@@ -434,6 +434,13 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
           }
         }
       }
+      return false;
+    };
+    const resolveStopAttempt = async () => {
+      if (!scheduledStopStamped || !scheduledFireIdentity) {
+        return;
+      }
+      await stampAbortPersistedWithRetries();
     };
     // Capture the paused thread's checkpoint ids BEFORE the terminal CAS: the prune
     // after the abort is scoped to exactly this set, so checkpoints a replacement
@@ -517,17 +524,20 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
           // no-ops — mark the abort persisted DIRECTLY: this route has no stop-side
           // persistence pending on this path, and without the mark the generation
           // owner's settlement barrier waits its full timeout on the ORIGINAL
-          // attempt's stamp before deferring to the reconciler.
+          // attempt's stamp before deferring to the reconciler. Same bounded retries
+          // as the live-stamp path, and a swallowed exhaustion must not read as
+          // success: with the fence unresolved the run keeps blocking overlap and
+          // global capacity until the stale window, so the response stays retryable
+          // until the stamp is durable.
           if (scheduledFireIdentity && !scheduledStopStamped) {
-            await markScheduledRunAbortPersisted(
-              scheduledFireIdentity.scheduleId,
-              scheduledFireIdentity.scheduledFor,
-            ).catch((err) =>
-              logger.warn(
-                `[AgentStream] Failed to mark retry abort persisted: ${jobStreamId}`,
-                err,
-              ),
-            );
+            const stamped = await stampAbortPersistedWithRetries();
+            if (!stamped) {
+              res.set('Retry-After', '2');
+              return res.status(503).json({
+                error: 'Stop delivered but its bookkeeping is not yet durable. Please retry.',
+                aborted: null,
+              });
+            }
           }
           await resolveStopAttempt();
           return res.json({ success: true, aborted: jobStreamId });

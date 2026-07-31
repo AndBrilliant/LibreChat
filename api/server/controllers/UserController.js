@@ -429,6 +429,28 @@ const deleteUserController = async (req, res) => {
       });
     }
 
+    // Same deferral discipline for INTERACTIVE generations: an abort changes the
+    // job's status, it does not drain the generation owner's asynchronous message,
+    // usage, and balance persistence — cascading now would let those writes recreate
+    // records for the deleted account. Any discovered job is aborted and the cascade
+    // deferred; the commitment above makes the sweep finish it autonomously.
+    const interactiveSettled = await quiesceInteractiveGenerations(user).catch((error) => {
+      logger.error('[deleteUserController] Failed to quiesce interactive generations', error);
+      return false;
+    });
+    if (!interactiveSettled) {
+      logger.warn(
+        `[deleteUserController] Deferring destructive deletion for ${user.id}: interactive ` +
+          'generations are still settling. The deletion barrier remains in place.',
+      );
+      res.set('Retry-After', '30');
+      return res.status(503).json({
+        message:
+          'Account deletion could not finish because active chats are still stopping. ' +
+          'Please try again shortly.',
+      });
+    }
+
     await executeUserDeletion(user, req.config);
     res.status(200).send({ message: 'User deleted' });
   } catch (err) {
@@ -438,11 +460,37 @@ const deleteUserController = async (req, res) => {
 };
 
 /**
+ * Interactive-generation quiesce: aborts the user's active interactive jobs and
+ * reports whether the cascade may proceed. Settlement is NOT provable within the
+ * pass that aborts — a job leaves the active set the moment the abort CAS lands,
+ * BEFORE the generation owner's asynchronous message/usage/balance writes drain —
+ * so ANY discovered job (and any unreadable store: fail closed) defers the cascade
+ * to a later pass. By the next pass the aborted owners have long unwound, and the
+ * auth barrier guarantees nothing new started in between; an empty enumeration is
+ * then a real settlement signal, not a race. Cross-replica delivery of the abort
+ * remains unconfirmed by design (see FOLLOWUPS) — the deferral bounds that window
+ * to the sweep interval instead of racing the cascade against it.
+ */
+const quiesceInteractiveGenerations = async (user) => {
+  const activeJobIds = await GenerationJobManager.getActiveJobIdsForUser(user.id, user.tenantId);
+  if (!activeJobIds?.length) {
+    return true;
+  }
+  for (const streamId of activeJobIds) {
+    await GenerationJobManager.abortJob(streamId).catch((err) =>
+      logger.warn(`[quiesceInteractiveGenerations] Failed to abort active job ${streamId}`, err),
+    );
+  }
+  return false;
+};
+
+/**
  * The destructive account-deletion cascade. Runs only AFTER the durable barrier is up
- * and the schedule quiesce confirmed settlement. Shared by the interactive controller
- * and the deferred-deletion sweep: a quiesce that could not confirm defers with the
- * barrier still raised, and authentication is refused behind the barrier, so no client
- * retry can ever arrive — the sweep is the promised retry.
+ * and BOTH quiesces (scheduled runs, interactive generations) confirmed settlement.
+ * Shared by the interactive controller and the deferred-deletion sweep: a quiesce that
+ * could not confirm defers with the barrier still raised, and authentication is
+ * refused behind the barrier, so no client retry can ever arrive — the sweep is the
+ * promised retry.
  */
 const executeUserDeletion = async (user, providedAppConfig) => {
   const appConfig =
@@ -454,21 +502,6 @@ const executeUserDeletion = async (user, providedAppConfig) => {
     }));
   /** Minimal request shim for the file-deletion service (reads user, config, body). */
   const req = { user, config: appConfig, body: {} };
-  // Abort the user's ACTIVE INTERACTIVE generations before destroying anything:
-  // authentication is already refused behind the barrier, but a generation admitted
-  // before it can keep writing for minutes. Best-effort — cross-replica delivery is
-  // unconfirmed by design (see FOLLOWUPS), and in-process/shared-store deployments
-  // get real aborts. Scheduled jobs were already settled by the quiesce.
-  try {
-    const activeJobIds = await GenerationJobManager.getActiveJobIdsForUser(user.id, user.tenantId);
-    for (const streamId of activeJobIds ?? []) {
-      await GenerationJobManager.abortJob(streamId).catch((err) =>
-        logger.warn(`[executeUserDeletion] Failed to abort active job ${streamId}`, err),
-      );
-    }
-  } catch (error) {
-    logger.warn('[executeUserDeletion] Failed to enumerate active jobs', error);
-  }
   await db.deleteMessages({ user: user.id });
   await db.deleteAllUserSessions({ userId: user.id });
   await db.deleteTransactions({ user: user.id });
@@ -572,6 +605,19 @@ const processPendingUserDeletions = async () => {
         if (!quiesced) {
           logger.warn(
             `[processPendingUserDeletions] Deferring ${user.id} again: scheduled runs did not confirm settlement`,
+          );
+          return;
+        }
+        const interactiveSettled = await quiesceInteractiveGenerations(user).catch((error) => {
+          logger.error(
+            `[processPendingUserDeletions] Interactive quiesce failed for ${user.id}`,
+            error,
+          );
+          return false;
+        });
+        if (!interactiveSettled) {
+          logger.warn(
+            `[processPendingUserDeletions] Deferring ${user.id} again: interactive generations are still settling`,
           );
           return;
         }

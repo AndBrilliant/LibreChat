@@ -374,6 +374,47 @@ describe('deleteUserController', () => {
     db.getUsersPendingDeletion.mockResolvedValue([]);
   });
 
+  it('sweep defers a user whose interactive generations were just aborted, then finishes next pass', async () => {
+    const { GenerationJobManager } = require('@librechat/api');
+    const db = require('~/models');
+    const { processPendingUserDeletions } = require('~/server/controllers/UserController');
+    const userId = new mongoose.Types.ObjectId();
+    db.getUsersPendingDeletion.mockResolvedValue([
+      {
+        _id: userId,
+        email: 'sweep-live@test.dev',
+        deletionRequestedAt: new Date(Date.now() - 120_000),
+        deletionCommittedAt: new Date(Date.now() - 120_000),
+      },
+    ]);
+    const activeSpy = jest
+      .spyOn(GenerationJobManager, 'getActiveJobIdsForUser')
+      .mockResolvedValueOnce(['conv-live']);
+    const abortSpy = jest
+      .spyOn(GenerationJobManager, 'abortJob')
+      .mockResolvedValue({ success: true });
+
+    await processPendingUserDeletions();
+
+    // The abort landed, but settlement is not provable in the aborting pass: the
+    // job leaves the active set at its abort CAS while the generation owner's
+    // message/usage/balance writes are still draining. Cascading now would let
+    // those writes recreate rows for the deleted account.
+    expect(abortSpy).toHaveBeenCalledWith('conv-live');
+    expect(db.deleteMessages).not.toHaveBeenCalled();
+    expect(db.deleteUserById).not.toHaveBeenCalled();
+
+    // Next pass: nothing active anymore — the aborted owner has unwound and the
+    // auth barrier admitted nothing new — so the cascade proceeds.
+    await processPendingUserDeletions();
+    expect(db.deleteMessages).toHaveBeenCalled();
+    expect(db.deleteUserById).toHaveBeenCalled();
+
+    db.getUsersPendingDeletion.mockResolvedValue([]);
+    activeSpy.mockRestore();
+    abortSpy.mockRestore();
+  });
+
   it('refuses BEFORE the barrier when the deletion commitment cannot be recorded', async () => {
     const db = require('~/models');
     db.markUserDeletionCommitted.mockRejectedValue(new Error('mongo down'));

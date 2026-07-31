@@ -112,6 +112,9 @@ describe('Agent Abort Endpoint', () => {
     // paused-run settle throw a silent 500 after its earlier assertions passed.
     mockClearScheduledJob.mockReset();
     mockClearScheduledJob.mockResolvedValue(undefined);
+    // Reset + re-arm so a test's persistent rejection cannot leak forward.
+    mockMarkScheduledRunAbortPersisted.mockReset();
+    mockMarkScheduledRunAbortPersisted.mockResolvedValue(undefined);
   });
 
   describe('POST /chat/abort', () => {
@@ -1021,6 +1024,55 @@ describe('Agent Abort Endpoint', () => {
         // Stamping a cleanup abort of a dead owner re-arms the 30-minute fence on
         // every Stop click, so the run could never age into the reconciler's recovery.
         expect(mockRequestScheduledRunAbort).not.toHaveBeenCalled();
+      });
+
+      it('keeps the scheduled terminal retry retryable when the stamp cannot be persisted', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue({
+          ...scheduledJob,
+          status: 'aborted',
+        });
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: false,
+          content: [],
+          jobData: { status: 'aborted' },
+        });
+        // The republish lands (default resignal mock publishes), but the direct
+        // abort-persistence mark keeps failing.
+        mockMarkScheduledRunAbortPersisted.mockRejectedValue(new Error('transient mongo failure'));
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'sched-conv' });
+
+        // A swallowed exhaustion here answered 200 with the abort fence still
+        // unresolved: the generation owner's settlement barrier then waits its full
+        // timeout, and the run blocks overlap and global capacity until the
+        // 30-minute stale window. Bounded retries first, retryable response after.
+        expect(mockMarkScheduledRunAbortPersisted).toHaveBeenCalledTimes(3);
+        expect(response.status).toBe(503);
+      });
+
+      it('resolves the scheduled terminal retry once the stamp becomes durable', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue({
+          ...scheduledJob,
+          status: 'aborted',
+        });
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: false,
+          content: [],
+          jobData: { status: 'aborted' },
+        });
+        mockMarkScheduledRunAbortPersisted
+          .mockRejectedValueOnce(new Error('transient mongo failure'))
+          .mockResolvedValueOnce(undefined);
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'sched-conv' });
+
+        expect(mockMarkScheduledRunAbortPersisted).toHaveBeenCalledTimes(2);
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({ success: true });
       });
 
       it('keeps the preserved job when the outcome write exhausted its retries', async () => {

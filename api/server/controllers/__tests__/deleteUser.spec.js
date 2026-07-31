@@ -21,7 +21,7 @@ const mockDeleteUserPrompts = jest.fn();
 const mockDeleteUserSkills = jest.fn();
 
 jest.mock('@librechat/data-schemas', () => ({
-  logger: { error: jest.fn(), info: jest.fn() },
+  logger: { error: jest.fn(), info: jest.fn(), warn: jest.fn() },
   webSearchKeys: [],
 }));
 
@@ -131,6 +131,7 @@ function createRes() {
   res.status = jest.fn().mockReturnValue(res);
   res.json = jest.fn().mockReturnValue(res);
   res.send = jest.fn().mockReturnValue(res);
+  res.set = jest.fn().mockReturnValue(res);
   return res;
 }
 
@@ -307,5 +308,43 @@ describe('deleteUserController - 2FA enforcement', () => {
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.send).toHaveBeenCalledWith({ message: 'User deleted' });
     expect(mockDeleteMessages).toHaveBeenCalled();
+  });
+});
+
+describe('deleteUserController - interactive generation quiesce', () => {
+  const { GenerationJobManager } = require('@librechat/api');
+
+  it('aborts discovered generations and defers the cascade instead of racing their unwind', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    GenerationJobManager.getActiveJobIdsForUser.mockResolvedValueOnce(['conv-live']);
+
+    await deleteUserController(req, res);
+
+    // An abort changes the job's status; it does NOT drain the generation owner's
+    // asynchronous message/usage/balance writes. Cascading in the same pass would
+    // let those writes recreate rows for the deleted account, so the cascade is
+    // deferred to the sweep — the barrier and commitment are already durable.
+    expect(GenerationJobManager.abortJob).toHaveBeenCalledWith('conv-live');
+    expect(res.set).toHaveBeenCalledWith('Retry-After', '30');
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockDeleteMessages).not.toHaveBeenCalled();
+    expect(mockDeleteUserById).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the job store cannot be enumerated', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    GenerationJobManager.getActiveJobIdsForUser.mockRejectedValueOnce(new Error('store down'));
+
+    await deleteUserController(req, res);
+
+    // Unknown generation state must defer, not destroy: a live generation this
+    // pass could not see may still be writing.
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockDeleteMessages).not.toHaveBeenCalled();
+    expect(mockDeleteUserById).not.toHaveBeenCalled();
   });
 });
