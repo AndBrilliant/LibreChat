@@ -1567,8 +1567,31 @@ describe('erasure leaves an idempotency tombstone', () => {
     expect(tombstone?.erased).toBe(true);
     expect(tombstone?.deleting).toBe(true);
     expect(tombstone?.clientRequestDigest).toBe('digest-1');
+    // ALLOWLIST semantics: everything except the replay-detection identity is gone,
+    // derived from the live schema paths so fields added later cannot leak either.
+    const contentKeys = Object.keys(tombstone ?? {}).filter(
+      (key) =>
+        ![
+          '_id',
+          '__v',
+          'id',
+          'user',
+          'tenantId',
+          'clientRequestId',
+          'clientRequestDigest',
+          'deleting',
+          'erased',
+          'erasedAt',
+          'enabled',
+          'createdAt',
+          'updatedAt',
+        ].includes(key),
+    );
+    expect(contentKeys).toEqual([]);
     expect(tombstone?.prompt).toBeUndefined();
     expect(tombstone?.name).toBeUndefined();
+    expect(tombstone?.cadence).toBeUndefined();
+    expect(tombstone?.timezone).toBeUndefined();
 
     // Tombstones are inert to every sweep: re-erasing or re-deleting them forever
     // would pin the bounded windows.

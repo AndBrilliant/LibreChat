@@ -1,8 +1,8 @@
 import { logger, runAsSystem } from '@librechat/data-schemas';
 import type { IScheduleRun } from '@librechat/data-schemas';
 import type { ScheduleEngineDeps, JobState } from './types';
+import { isShutdownInProgress, registerShutdownTask } from '~/app/shutdown';
 import { fireSchedule, BALANCE_SKIP_DISABLE_THRESHOLD } from './fire';
-import { registerShutdownTask } from '~/app/shutdown';
 import { computeNextRunAt } from './cadence';
 import { hasAbortInFlight } from './types';
 
@@ -403,10 +403,11 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
         }
         try {
           const result = await fireSchedule(
-            // The engine's stop flag reaches the dispatch boundary: a pass in flight
-            // when shutdown begins releases its claim instead of POSTing at the
-            // closing listener.
-            { ...deps, isShuttingDown: () => stopped },
+            // The dispatch boundary observes shutdown from BOTH signals: the
+            // coordinator flag flips before the listener starts closing (ahead of
+            // any pre-drain task ordering), and the engine's own stop covers direct
+            // runTick callers outside a coordinated shutdown.
+            { ...deps, isShuttingDown: () => stopped || isShutdownInProgress() },
             schedule,
             limits,
             scheduledFor,

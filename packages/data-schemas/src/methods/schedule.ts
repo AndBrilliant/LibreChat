@@ -1589,6 +1589,24 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
    * let the worker then insert a ghost row against a gone schedule that it can no
    * longer prove it owns. Returns whether it erased.
    */
+  /** The ONLY fields an erasure tombstone keeps: replay-detection identity plus the
+   *  flags that keep it inert to sweeps and resolvable by the create replay path. */
+  const TOMBSTONE_IDENTITY_FIELDS = new Set([
+    '_id',
+    '__v',
+    'id',
+    'user',
+    'tenantId',
+    'clientRequestId',
+    'clientRequestDigest',
+    'deleting',
+    'erased',
+    'erasedAt',
+    'enabled',
+    'createdAt',
+    'updatedAt',
+  ]);
+
   async function eraseScheduleIfDrained(id: string): Promise<boolean> {
     // A live lease (leaseUntil in the future) means a worker still holds the claim.
     // Worker clock, DocumentDB-portable: `$gt` matches neither missing nor null, so a
@@ -1620,24 +1638,18 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
     // would let the retry recreate the recurring work they just removed. The
     // tombstone keeps only the identity fields (key, digest, owner) for a bounded
     // window (TTL on erasedAt); the replay path answers "deleted" against it.
+    // ALLOWLIST, not a blocklist: everything except the replay-detection identity
+    // is unset, derived from the live schema paths so a field added later (tools,
+    // cron, anything) cannot silently survive into the tombstone. The deletion path
+    // promises that ONLY the idempotency identity remains.
+    const contentFields = [
+      ...new Set(Object.keys(Schedule().schema.paths).map((path) => path.split('.')[0])),
+    ].filter((field) => !TOMBSTONE_IDENTITY_FIELDS.has(field));
     const tombstoned = await Schedule().updateOne(
       { id, deleting: true, clientRequestId: { $exists: true } },
       {
         $set: { erased: true, erasedAt: new Date(), enabled: false },
-        $unset: {
-          name: 1,
-          prompt: 1,
-          agent_id: 1,
-          cadence: 1,
-          timezone: 1,
-          file_ids: 1,
-          lastRun: 1,
-          nextRunAt: 1,
-          leaseUntil: 1,
-          leaseBy: 1,
-          disabledReason: 1,
-          countedFor: 1,
-        },
+        $unset: Object.fromEntries(contentFields.map((field) => [field, 1])),
         // Not a config edit; the tombstone must not surface in updated-time listings.
       },
       { timestamps: false },

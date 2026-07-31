@@ -73,6 +73,24 @@ async function passportLogin(req, email, password, done) {
       return done(null, user, { message: 'Email not verified.' });
     }
 
+    // FINAL barrier recheck at the successful-login boundary, sequenced after the
+    // slow awaits above (bcrypt runs tens of milliseconds): a deletion barrier
+    // raised mid-comparison would otherwise hand a stale user to loginController,
+    // whose session/token/balance writes recreate records the cascade deleted.
+    // The lookup at the top only covers barriers committed before it.
+    let barrier = null;
+    try {
+      barrier = await findUser({ email: email.trim() }, 'deletionRequestedAt');
+    } catch {
+      barrier = null;
+    }
+    if (barrier == null || barrier.deletionRequestedAt != null) {
+      logger.warn(
+        `[Login] Refusing login for ${user._id}: deletion barrier raised or unverifiable`,
+      );
+      return done(null, false, { message: 'Account deletion in progress' });
+    }
+
     logger.info(`[Login] [Login successful] [Username: ${email}] [Request-IP: ${req.ip}]`);
     return done(null, user);
   } catch (err) {
