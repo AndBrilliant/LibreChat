@@ -13,7 +13,7 @@ const AUTH_USER_DOC_CACHE_VERSION = 1;
 export const AUTH_USER_DOC_CACHE_TTL_MS = 5000;
 /** Must outlive every entry written BEFORE the invalidation that stamped it, so any
  *  such entry is guaranteed to meet the epoch on its next read. */
-export const AUTH_USER_DOC_EPOCH_TTL_MS = AUTH_USER_DOC_CACHE_TTL_MS * 2;
+export const AUTH_USER_DOC_EPOCH_TTL_MS: number = AUTH_USER_DOC_CACHE_TTL_MS * 2;
 
 export type AuthUserDocCacheMode = 'off' | 'on';
 
