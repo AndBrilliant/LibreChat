@@ -476,7 +476,7 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
       abortResult.signalDelivered === false &&
       abortResult.signalPublished === false
     ) {
-      await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(() => false);
+      await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(() => undefined);
       res.set('Retry-After', '2');
       return res.status(503).json({
         error: 'Stop recorded but not yet delivered to the generation. Please retry.',
@@ -495,9 +495,21 @@ router.post('/chat/abort', configMiddleware, async (req, res) => {
         // trust it (the interactive mirror of the scheduled path's resignalAbort),
         // so the retry after a failed-publish 503 actually redelivers.
         if (abortResult.jobData.status === 'aborted') {
-          await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(
-            () => undefined,
-          );
+          const resignal = await GenerationJobManager.resignalAbort(
+            jobStreamId,
+            job.createdAt,
+          ).catch(() => ({ delivered: false, published: false }));
+          // A swallowed republication failure must not read as success: with the
+          // signal provably still on this replica, the peer-owned generation keeps
+          // running, so the response stays retryable until a publish leaves (or
+          // this process turns out to own the generation).
+          if (!scheduledFireIdentity && !resignal.delivered && !resignal.published) {
+            res.set('Retry-After', '2');
+            return res.status(503).json({
+              error: 'Stop recorded but not yet delivered to the generation. Please retry.',
+              aborted: null,
+            });
+          }
           await resolveStopAttempt();
           return res.json({ success: true, aborted: jobStreamId });
         }

@@ -133,6 +133,28 @@ function sanitizeUserForCache(user: Partial<IUser>): CachedAuthUser {
   return sanitized;
 }
 
+/** Removes ONE cache key from the user's reverse index, preserving the rest: an
+ *  unwind that deleted the whole index left the user's OTHER live entries
+ *  undiscoverable, so later mutations and deletions could no longer invalidate
+ *  them and a stale document survived to its TTL. */
+async function forgetUserCacheKey(
+  store: AuthUserDocCacheStore,
+  userId: string,
+  cacheKey: string,
+): Promise<void> {
+  const indexKey = buildAuthUserDocReverseIndexKey(userId);
+  const existing = await store.get<string[]>(indexKey);
+  if (!Array.isArray(existing)) {
+    return;
+  }
+  const remaining = existing.filter((value) => value !== cacheKey);
+  if (remaining.length === 0) {
+    await store.delete(indexKey);
+    return;
+  }
+  await store.set(indexKey, remaining, AUTH_USER_DOC_CACHE_TTL_MS);
+}
+
 async function rememberUserCacheKey(
   store: AuthUserDocCacheStore,
   userId: string,
@@ -201,7 +223,7 @@ export async function setCachedAuthUserDoc(
       const tombstoned = await store.get(buildAuthUserDocTombstoneKey(userId));
       if (tombstoned != null) {
         await store.delete(cacheKey);
-        await store.delete(buildAuthUserDocReverseIndexKey(userId));
+        await forgetUserCacheKey(store, userId, cacheKey);
         return 'tombstoned';
       }
     }
@@ -220,7 +242,7 @@ export async function setCachedAuthUserDoc(
       try {
         await store.delete(cacheKey);
         if (userId) {
-          await store.delete(buildAuthUserDocReverseIndexKey(userId));
+          await forgetUserCacheKey(store, userId, cacheKey);
         }
       } catch {
         // TTL-bounded residual; nothing further to do.

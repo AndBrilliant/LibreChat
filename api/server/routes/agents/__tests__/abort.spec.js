@@ -20,7 +20,7 @@ const mockLogger = {
 const mockGenerationJobManager = {
   getJob: jest.fn(),
   abortJob: jest.fn(),
-  resignalAbort: jest.fn(async () => false),
+  resignalAbort: jest.fn(async () => ({ delivered: false, published: true })),
   getActiveJobIdsForUser: jest.fn(),
 };
 
@@ -829,6 +829,27 @@ describe('Agent Abort Endpoint', () => {
         expect(mockGenerationJobManager.resignalAbort).toHaveBeenCalled();
         expect(response.status).toBe(503);
         expect(mockSaveMessage).not.toHaveBeenCalled();
+      });
+
+      it('stays retryable when the terminal-branch republication also fails', async () => {
+        mockGenerationJobManager.getJob.mockResolvedValue(interactiveJob);
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: false,
+          content: [],
+          jobData: { status: 'aborted' },
+        });
+        // The retry's republish is ALSO swallowed on this replica: answering 200
+        // here told the client the stop landed while the signal provably never left.
+        mockGenerationJobManager.resignalAbort.mockResolvedValueOnce({
+          delivered: false,
+          published: false,
+        });
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'test-conv' });
+
+        expect(response.status).toBe(503);
       });
 
       it('re-signals an already-aborted job instead of trusting terminal status', async () => {

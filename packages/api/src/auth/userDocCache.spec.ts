@@ -209,6 +209,38 @@ describe('auth user document cache helpers', () => {
     expect(store.values.has(buildAuthUserDocReverseIndexKey(userId.toString()))).toBe(false);
   });
 
+  it("preserves the user's OTHER cache entries when unwinding a failed fill", async () => {
+    const store = makeStore();
+    const userId = new Types.ObjectId();
+    const survivingKey = 'auth-user-doc:v1:other-session';
+    const failingKey = 'auth-user-doc:v1:failing-fill';
+    // Another live entry for the same user, already indexed.
+    store.values.set(survivingKey, { version: 1, cachedAt: Date.now(), user: {} });
+    store.values.set(buildAuthUserDocReverseIndexKey(userId.toString()), [survivingKey]);
+    const realGet = store.get;
+    store.get = (async (key: string) => {
+      if (key.startsWith('auth-user-doc-tombstone:')) {
+        throw new Error('redis blip');
+      }
+      return realGet(key);
+    }) as typeof store.get;
+
+    await setCachedAuthUserDoc(store, failingKey, {
+      _id: userId,
+      id: userId.toString(),
+      email: 'user@example.com',
+    });
+
+    // Deleting the WHOLE index left the surviving entry undiscoverable: later
+    // mutations and deletions could no longer invalidate it, so a stale document
+    // was served until its TTL. Only the failed fill's key is removed.
+    expect(store.values.has(failingKey)).toBe(false);
+    expect(store.values.get(buildAuthUserDocReverseIndexKey(userId.toString()))).toEqual([
+      survivingKey,
+    ]);
+    expect(store.values.has(survivingKey)).toBe(true);
+  });
+
   it('deduplicates reverse-index keys and caps the remembered set', async () => {
     const store = makeStore();
     const objectId = new Types.ObjectId();

@@ -491,20 +491,20 @@ export function createSchedulesService(
       // every retry instead; delivery stays ownership-honest, and the caller's
       // bounded drain confirms on the owner's settle once the signal actually lands.
       if (job.status === 'aborted') {
-        const delivered = await GenerationJobManager.resignalAbort(
+        const resignal = await GenerationJobManager.resignalAbort(
           conversationId,
           job.createdAt,
         ).catch((err) => {
           logger.warn('[schedules] failed to re-signal abort:', err);
-          return false;
+          return { delivered: false, published: false };
         });
-        if (options?.preserve === false && delivered) {
+        if (options?.preserve === false && resignal.delivered) {
           // Only provably-quiet evidence is disposable (account deletion hard-deletes
           // the run rows, so nothing would ever clear this job later). Undelivered:
           // keep it — the drain stays unconfirmed and a later pass re-signals.
           await store.deleteJob(conversationId, job.createdAt);
         }
-        return delivered;
+        return resignal.delivered;
       }
       // Finished naturally (`complete`/`error`): the generation persisted and stopped
       // on its own — nothing to signal. For a per-schedule delete (preserve) leave the

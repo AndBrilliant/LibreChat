@@ -512,6 +512,38 @@ describe('SteeringLifecycle via GenerationJobManager.steering (in-memory)', () =
       }
     });
 
+    test('abortJob retains the job when the publication provably failed', async () => {
+      const streamId = 'steer-abort-publish-fails';
+      const transport = new InMemoryEventTransport();
+      (transport as IEventTransport).emitAbort = async () => {
+        throw new Error('redis publish failed');
+      };
+      const localManager = new GenerationJobManagerClass();
+      localManager.configure({
+        jobStore,
+        eventTransport: transport,
+        isRedis: false,
+        // Production default: terminal jobs are deleted on completion...
+        cleanupOnComplete: true,
+      });
+      localManager.initialize();
+      const job = await localManager.createJob(streamId, 'user-1');
+
+      try {
+        const result = await localManager.abortJob(streamId);
+        expect(result.success).toBe(true);
+        expect(result.signalPublished).toBe(false);
+        // ...but a failed publish RETAINS it: the terminal job is the only thing
+        // a retry (or the route's immediate resignalAbort) can re-signal from.
+        await expect(jobStore.getJob(streamId)).resolves.toMatchObject({
+          status: 'aborted',
+          createdAt: job.createdAt,
+        });
+      } finally {
+        await localManager.destroy();
+      }
+    });
+
     test('abortJob publishes nothing when natural completion wins its terminal CAS', async () => {
       const streamId = 'steer-abort-loses-terminal-race';
       const eventTransport = new InMemoryEventTransport();

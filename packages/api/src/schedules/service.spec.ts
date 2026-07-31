@@ -24,7 +24,7 @@ jest.mock('../stream/GenerationJobManager', () => ({
     // loop is driven purely by getActiveRunsForUser (the run rows).
     getJobStore: () => mockJobStore,
     abortJob: jest.fn(),
-    resignalAbort: jest.fn(async () => false),
+    resignalAbort: jest.fn(async () => ({ delivered: false, published: true })),
     isRedis: false,
   },
 }));
@@ -1171,7 +1171,7 @@ describe('abort retries re-signal instead of trusting terminal status', () => {
       })),
     } as unknown as typeof mockJobStore;
     const manager = jest.requireMock('../stream/GenerationJobManager').GenerationJobManager;
-    manager.resignalAbort = jest.fn(async () => false);
+    manager.resignalAbort = jest.fn(async () => ({ delivered: false, published: true }));
 
     // The first abort flipped the job before its publication; a retry that trusts
     // the terminal status returns "delivered" without republishing, and a failed
@@ -1198,7 +1198,7 @@ describe('abort retries re-signal instead of trusting terminal status', () => {
       deleteJob,
     } as unknown as typeof mockJobStore;
     const manager = jest.requireMock('../stream/GenerationJobManager').GenerationJobManager;
-    manager.resignalAbort = jest.fn(async () => false);
+    manager.resignalAbort = jest.fn(async () => ({ delivered: false, published: true }));
 
     const delivered = await service.engineDeps.abortScheduledJob(
       'c1',

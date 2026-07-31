@@ -1458,19 +1458,26 @@ class GenerationJobManagerClass {
    * OWNERSHIP, never publish success. Callers confirm actual delivery by the run
    * settling (the owner settles last), which their bounded drains already poll.
    */
-  async resignalAbort(streamId: string, expectedCreatedAt?: number): Promise<boolean> {
+  async resignalAbort(
+    streamId: string,
+    expectedCreatedAt?: number,
+  ): Promise<{ delivered: boolean; published: boolean }> {
     const jobData = await this.jobStore.getJob(streamId);
     if (
       jobData == null ||
       jobData.status !== 'aborted' ||
       (expectedCreatedAt != null && jobData.createdAt !== expectedCreatedAt)
     ) {
-      return false;
+      return { delivered: false, published: false };
     }
     const runtime = this.runtimeState.get(streamId);
     if (runtime?.createdAt === jobData.createdAt) {
       runtime.abortController.abort();
     }
+    // `published` reports whether the republication left this replica (see
+    // AbortResult.signalPublished); callers must stay retryable when it did not,
+    // instead of discarding a swallowed failure and answering success.
+    let published = true;
     if (this.eventTransport.emitAbort) {
       try {
         await withTimeout(
@@ -1479,10 +1486,11 @@ class GenerationJobManagerClass {
           `Abort republication timed out for ${streamId}`,
         );
       } catch (err) {
+        published = false;
         logger.error(`[GenerationJobManager] Failed to republish abort for ${streamId}:`, err);
       }
     }
-    return this.ownedJobs.get(streamId) === jobData.createdAt;
+    return { delivered: this.ownedJobs.get(streamId) === jobData.createdAt, published };
   }
 
   async abortJob(
@@ -1778,7 +1786,12 @@ class GenerationJobManagerClass {
     if (runtime) {
       runtime.startupTelemetry = undefined;
     }
-    if (this._cleanupOnComplete && !options?.preserveForReconcile) {
+    // SKIPPED when the abort publication provably failed: the terminal job is the
+    // only thing a retry (or the route's immediate resignalAbort) can re-signal
+    // FROM — deleting it made every retry read a missing job, publish nothing, and
+    // answer 404 while the peer-owned generation kept running. The store's
+    // completed-job TTL bounds the retained record.
+    if (this._cleanupOnComplete && !options?.preserveForReconcile && abortSignalPublished) {
       // A replacement created after the abort CAS makes this a safe no-op. Best-effort
       // and bounded like every other post-CAS store/transport call: the job is already
       // terminal, so a leaked record falls to the store TTL / retained-job reaper,
