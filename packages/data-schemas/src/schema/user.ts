@@ -179,6 +179,19 @@ const userSchema: Schema<IUser> = new Schema<IUser>(
     deletionCommittedAt: {
       type: Date,
     },
+    /**
+     * Stream ids whose deletion-side abort has NOT been acknowledged: the shared job
+     * went terminal at the abort CAS, but the signal provably never left the aborting
+     * replica, so a peer owner may still be generating. Durable and TTL-free ON
+     * PURPOSE — the fence has to outlive any publication outage, and expiry must
+     * never be mistaken for settlement. Stamped BEFORE the abort (a failed stamp
+     * refuses the abort, which is side-effect free) and cleared only once the signal
+     * leaves the replica or the job is gone.
+     */
+    deletionAbortFences: {
+      type: [String],
+      default: undefined,
+    },
     /** Field for external source identification (for consistency with TPrincipal schema) */
     idOnTheSource: {
       type: String,

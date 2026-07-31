@@ -10,16 +10,6 @@ import type { StandardGraph } from '@librechat/agents';
  */
 export type JobStatus = 'running' | 'complete' | 'error' | 'aborted' | 'requires_action';
 
-/** What a user-finalization marker fences: the owner's post-terminal 'title' writes
- *  (owner-cleared), or a deletion-side 'abort' whose delivery is unacknowledged
- *  (quiesce-cleared once the publish leaves or the job is gone). */
-export type UserFinalizationKind = 'title' | 'abort';
-
-export interface UserFinalization {
-  streamId: string;
-  kind: UserFinalizationKind;
-}
-
 /**
  * Serializable job data - no object references, suitable for Redis/external storage
  */
@@ -579,21 +569,13 @@ export interface IJobStore {
    * TTL-bounded in the store so a crash between register and clear can only fence
    * deletion for the TTL, never forever.
    */
-  registerUserFinalization(
-    userId: string,
-    streamId: string,
-    tenantId?: string,
-    kind?: UserFinalizationKind,
-  ): Promise<void>;
+  registerUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void>;
 
   /** Clear a finalization registered by {@link registerUserFinalization}. */
   clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void>;
 
   /** Count live (unexpired) finalizations for a user. */
   countUserFinalizations(userId: string, tenantId?: string): Promise<number>;
-
-  /** List live (unexpired) finalizations for a user. */
-  listUserFinalizations(userId: string, tenantId?: string): Promise<UserFinalization[]>;
 
   // ===== Content State Methods =====
   // These methods manage volatile content state tied to each job.

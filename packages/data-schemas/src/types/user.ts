@@ -61,6 +61,9 @@ export interface IUser extends Document {
   deletionRequestedAt?: Date;
   deletionSweepAt?: Date;
   deletionCommittedAt?: Date;
+  /** Stream ids whose deletion-side abort has not been acknowledged; durable and
+   *  TTL-free so a publication outage can never be mistaken for settlement. */
+  deletionAbortFences?: string[];
   /** Field for external source identification (for consistency with TPrincipal schema) */
   idOnTheSource?: string;
   tenantId?: string;

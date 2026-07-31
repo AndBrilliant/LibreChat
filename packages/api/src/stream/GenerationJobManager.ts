@@ -22,8 +22,6 @@ import type {
   AbortResult,
   IJobStore,
   IdempotencyClaimResult,
-  UserFinalizationKind,
-  UserFinalization,
 } from './interfaces/IJobStore';
 import type { AgentStartupTelemetry } from '~/agents/startup';
 import type { SteerContentView } from './SteeringLifecycle';
@@ -4172,9 +4170,8 @@ class GenerationJobManagerClass {
     userId: string,
     streamId: string,
     tenantId?: string,
-    kind?: UserFinalizationKind,
   ): Promise<void> {
-    return this.jobStore.registerUserFinalization(userId, streamId, tenantId, kind);
+    return this.jobStore.registerUserFinalization(userId, streamId, tenantId);
   }
 
   async clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void> {
@@ -4183,10 +4180,6 @@ class GenerationJobManagerClass {
 
   async countUserFinalizations(userId: string, tenantId?: string): Promise<number> {
     return this.jobStore.countUserFinalizations(userId, tenantId);
-  }
-
-  async listUserFinalizations(userId: string, tenantId?: string): Promise<UserFinalization[]> {
-    return this.jobStore.listUserFinalizations(userId, tenantId);
   }
 
   private async finalizeOwnedJobsForShutdown(): Promise<void> {

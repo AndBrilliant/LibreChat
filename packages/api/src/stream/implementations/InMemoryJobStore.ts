@@ -11,8 +11,6 @@ import type {
   JobStatusTransition,
   IdempotencyClaimValue,
   IdempotencyClaimResult,
-  UserFinalizationKind,
-  UserFinalization,
 } from '~/stream/interfaces/IJobStore';
 import {
   STEER_ENQUEUE_NOT_RUNNING,
@@ -59,11 +57,8 @@ export class InMemoryJobStore implements IJobStore {
 
   /** Maps userId -> Set of streamIds (conversationIds) for active jobs */
   private userJobMap = new Map<string, Set<string>>();
-  /** userKey -> (streamId -> marker) of finalizations still landing. */
-  private userFinalizations = new Map<
-    string,
-    Map<string, { kind: UserFinalizationKind; expiresAt: number }>
-  >();
+  /** userKey -> (streamId -> expiry ms) of owner finalizations still landing. */
+  private userFinalizations = new Map<string, Map<string, number>>();
 
   /**
    * Maps streamId -> last generation-activity timestamp. Refreshed via
@@ -552,7 +547,6 @@ export class InMemoryJobStore implements IJobStore {
     userId: string,
     streamId: string,
     tenantId?: string,
-    kind: UserFinalizationKind = 'title',
   ): Promise<void> {
     const userKey = tenantId ? `${tenantId}:${userId}` : userId;
     let entries = this.userFinalizations.get(userKey);
@@ -560,7 +554,7 @@ export class InMemoryJobStore implements IJobStore {
       entries = new Map();
       this.userFinalizations.set(userKey, entries);
     }
-    entries.set(streamId, { kind, expiresAt: Date.now() + USER_FINALIZATION_TTL_MS });
+    entries.set(streamId, Date.now() + USER_FINALIZATION_TTL_MS);
   }
 
   async clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void> {
@@ -576,28 +570,22 @@ export class InMemoryJobStore implements IJobStore {
   }
 
   async countUserFinalizations(userId: string, tenantId?: string): Promise<number> {
-    return (await this.listUserFinalizations(userId, tenantId)).length;
-  }
-
-  async listUserFinalizations(userId: string, tenantId?: string): Promise<UserFinalization[]> {
     const userKey = tenantId ? `${tenantId}:${userId}` : userId;
     const entries = this.userFinalizations.get(userKey);
     if (!entries) {
-      return [];
+      return 0;
     }
     const now = Date.now();
-    const live: UserFinalization[] = [];
-    for (const [streamId, marker] of entries) {
-      if (marker.expiresAt <= now) {
+    for (const [streamId, expiresAt] of entries) {
+      if (expiresAt <= now) {
         entries.delete(streamId);
-      } else {
-        live.push({ streamId, kind: marker.kind });
       }
     }
     if (entries.size === 0) {
       this.userFinalizations.delete(userKey);
+      return 0;
     }
-    return live;
+    return entries.size;
   }
 
   // ===== Content State Methods =====

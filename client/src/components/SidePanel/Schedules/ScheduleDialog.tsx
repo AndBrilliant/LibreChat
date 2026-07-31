@@ -227,26 +227,31 @@ export default function ScheduleDialog({
 
   const isLoading = createSchedule.isLoading || updateSchedule.isLoading;
 
+  /** The stored weekly days an edit deliberately keeps: the form's single-day picker
+   *  only holds `daysOfWeek[0]`, so an untouched picker must not collapse a
+   *  multi-day (API-created) weekly schedule. ONE rule, used by both the submitted
+   *  cadence and the summary — a summary built without it told the user the schedule
+   *  runs on one day while the submit preserved (and kept firing) all of them. */
+  const resolvePreservedWeeklyDays = (nextFrequency: ScheduleFormValues['frequency']) =>
+    schedule &&
+    !dirtyFields.dayOfWeek &&
+    !dirtyFields.frequency &&
+    schedule.cadence.frequency === 'weekly' &&
+    nextFrequency === 'weekly'
+      ? schedule.cadence.daysOfWeek
+      : undefined;
+
   const onSubmit = (values: ScheduleFormValues) => {
     if (schedule) {
       // Preserve the stored cadence entirely on a pure rename (no cadence control
-      // touched). If some cadence control WAS touched but the weekly day picker
-      // wasn't, keep the stored `daysOfWeek` so touching the time doesn't collapse
-      // a multi-day weekly schedule to a single day.
+      // touched).
       const cadenceTouched =
         dirtyFields.frequency ||
         dirtyFields.hour12 ||
         dirtyFields.minute ||
         dirtyFields.meridiem ||
         dirtyFields.dayOfWeek;
-      const preserveWeeklyDays =
-        !dirtyFields.dayOfWeek &&
-        !dirtyFields.frequency &&
-        schedule.cadence.frequency === 'weekly' &&
-        values.frequency === 'weekly'
-          ? schedule.cadence.daysOfWeek
-          : undefined;
-      const cadence = buildCadence(values, preserveWeeklyDays);
+      const cadence = buildCadence(values, resolvePreservedWeeklyDays(values.frequency));
       // PATCH only the fields the user actually touched, like the cadence handling
       // above: submitting the whole form snapshot silently overwrites fields another
       // tab or session edited while this dialog sat open (the server's revision fence
@@ -306,7 +311,10 @@ export default function ScheduleDialog({
     createSchedule.mutate(payload);
   };
 
-  const summaryCadence = buildCadence({ frequency, hour12, minute, meridiem, dayOfWeek });
+  const summaryCadence = buildCadence(
+    { frequency, hour12, minute, meridiem, dayOfWeek },
+    resolvePreservedWeeklyDays(frequency),
+  );
   const summary = `${describeCadence(summaryCadence, localize, locale)} · ${timezone}`;
   const canSubmit = name.trim().length > 0 && prompt.trim().length > 0 && agentId.length > 0;
 

@@ -10,6 +10,10 @@ import type { CacheStore } from '~/types';
 import { escapeRegExp } from '~/utils/string';
 import { signPayload } from '~/crypto';
 
+/** Sentinel fence returned when the user document cannot be READ: a quiesce that
+ *  cannot see the abort fences must never conclude settlement. */
+export const UNREADABLE_ABORT_FENCE = '__unreadable__';
+
 /** Default JWT session expiry: 15 minutes in milliseconds */
 export const DEFAULT_SESSION_EXPIRY: number = 1000 * 60 * 15;
 
@@ -128,6 +132,9 @@ export function createUserMethods(
   markDeletionSweepAttempted: (userIds: string[]) => Promise<void>;
   /** Commits a deletion to automatic completion; only these are swept. */
   markUserDeletionCommitted: (userId: string) => Promise<void>;
+  addUserAbortFence: (userId: string, streamId: string) => Promise<void>;
+  clearUserAbortFence: (userId: string, streamId: string) => Promise<void>;
+  getUserAbortFences: (userId: string) => Promise<string[]>;
   updateUserPlugins: (
     userId: string,
     plugins: string[] | undefined,
@@ -436,6 +443,50 @@ export function createUserMethods(
     // Cached copies must not retain stale marker fields; best-effort like every
     // non-barrier user mutation (the marker is not consulted at admission).
     await invalidateAuthUserDocCache(userId);
+  }
+
+  /**
+   * Records a stream id whose deletion-side abort is not yet acknowledged. Stamped
+   * BEFORE the abort transitions the shared job, so a failure here refuses the abort
+   * while it is still side-effect free — the inverse ordering left the job terminal
+   * (invisible to the next pass's active-set scan) with no durable fence. Idempotent
+   * via $addToSet. THROWS on failure: the caller must not proceed.
+   */
+  async function addUserAbortFence(userId: string, streamId: string): Promise<void> {
+    const User = mongoose.models.User;
+    await User.updateOne(
+      { _id: userId },
+      { $addToSet: { deletionAbortFences: streamId } },
+      { timestamps: false },
+    );
+  }
+
+  /** Clears an acknowledged abort fence (signal left the replica, or the job is gone). */
+  async function clearUserAbortFence(userId: string, streamId: string): Promise<void> {
+    const User = mongoose.models.User;
+    await User.updateOne(
+      { _id: userId },
+      { $pull: { deletionAbortFences: streamId } },
+      { timestamps: false },
+    );
+  }
+
+  /**
+   * The user's unacknowledged abort fences. A READ FAILURE reports a sentinel fence,
+   * because a quiesce that cannot see the fences must never conclude settlement. A
+   * missing document is not that case: the fences live ON the document, so its
+   * absence means no fence was ever recorded and there is nothing to settle.
+   */
+  async function getUserAbortFences(userId: string): Promise<string[]> {
+    const User = mongoose.models.User;
+    try {
+      const user = await User.findById(userId)
+        .select('deletionAbortFences')
+        .lean<Pick<IUser, 'deletionAbortFences'>>();
+      return user?.deletionAbortFences ?? [];
+    } catch {
+      return [UNREADABLE_ABORT_FENCE];
+    }
   }
 
   /** Rotation stamp for the deferred-deletion sweep window. Bookkeeping only, but it
@@ -770,6 +821,9 @@ export function createUserMethods(
     getUsersPendingDeletion,
     markDeletionSweepAttempted,
     markUserDeletionCommitted,
+    addUserAbortFence,
+    clearUserAbortFence,
+    getUserAbortFences,
     updateUserPlugins,
     toggleUserMemories,
   };

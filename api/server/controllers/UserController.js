@@ -5,6 +5,7 @@ const {
   webSearchKeys,
   runAsSystem,
   tenantStorage,
+  UNREADABLE_ABORT_FENCE,
 } = require('@librechat/data-schemas');
 const {
   getNewS3URL,
@@ -472,15 +473,18 @@ const deleteUserController = async (req, res) => {
  * to the sweep interval instead of racing the cascade against it.
  */
 /**
- * Settlement attempt for an 'abort' finalization marker — a deletion-side abort
- * whose signal provably never left this replica. The shared job went terminal at
- * the abort CAS, so the peer OWNER may still be generating with nothing in the
- * active set to show for it; the marker is the fence, and it clears only on an
- * acknowledgeable outcome: the publish finally leaves this replica (delivered or
- * republished), or the job is gone/reused (the owner finished and cleaned up —
- * its writes are done). Anything else refreshes the fence and keeps deferring.
+ * Settlement attempt for one durable abort fence — a deletion-side abort whose signal
+ * provably never left the aborting replica. The shared job went terminal at the abort
+ * CAS, so the peer OWNER may still be generating with nothing in the active set to
+ * show for it; the fence is the evidence, and it clears only on an acknowledgeable
+ * outcome: the publish finally leaves this replica (delivered or republished), or the
+ * job is gone/reassigned (the owner finished and cleaned up, so its writes are done).
+ * Anything else keeps the fence and defers.
  */
-const settleUndeliveredAbort = async (user, streamId) => {
+const settleAbortFence = async (user, streamId) => {
+  if (streamId === UNREADABLE_ABORT_FENCE) {
+    return false;
+  }
   let job;
   try {
     job = await GenerationJobManager.getJob(streamId);
@@ -488,15 +492,23 @@ const settleUndeliveredAbort = async (user, streamId) => {
     logger.warn(`[quiesceInteractiveGenerations] Could not read job ${streamId}`, error);
     return false;
   }
-  if (job == null || job.userId !== user.id) {
-    await GenerationJobManager.clearUserFinalization(user.id, streamId, user.tenantId).catch(
-      () => undefined,
-    );
-    return true;
+  // OWNERSHIP from the facade's metadata, not the top level: getJob returns a
+  // GenerationJob whose owner lives at `metadata.userId`, so comparing `job.userId`
+  // read undefined and cleared every fence as "reassigned" without ever re-signalling.
+  const ownerId = job?.metadata?.userId;
+  const ownerTenantId = job?.metadata?.tenantId;
+  if (
+    job == null ||
+    ownerId !== user.id ||
+    (ownerTenantId ?? undefined) !== (user.tenantId ?? undefined)
+  ) {
+    await db.clearUserAbortFence(user.id, streamId).catch((err) => {
+      logger.warn(`[quiesceInteractiveGenerations] Failed to clear fence ${streamId}`, err);
+    });
+    return false;
   }
   if (job.status === 'running' || job.status === 'requires_action') {
-    // Live again despite terminal-at-CAS bookkeeping (lost membership self-heal):
-    // re-abort and keep the fence; a later pass settles it.
+    // Live again despite terminal-at-CAS bookkeeping: re-abort and keep the fence.
     await GenerationJobManager.abortJob(streamId).catch(() => undefined);
     return false;
   }
@@ -504,76 +516,86 @@ const settleUndeliveredAbort = async (user, streamId) => {
     delivered: false,
     published: false,
   }));
-  if (resignal.delivered || resignal.published) {
-    await GenerationJobManager.clearUserFinalization(user.id, streamId, user.tenantId).catch(
-      () => undefined,
-    );
-    return true;
+  if (!resignal.delivered && !resignal.published) {
+    return false;
   }
-  await GenerationJobManager.registerUserFinalization(
-    user.id,
-    streamId,
-    user.tenantId,
-    'abort',
-  ).catch(() => undefined);
-  return false;
+  try {
+    await db.clearUserAbortFence(user.id, streamId);
+  } catch (error) {
+    // The signal left, but the fence is still durable: report unsettled so a later
+    // pass retries the clear rather than cascading on an unrecorded acknowledgement.
+    logger.warn(`[quiesceInteractiveGenerations] Failed to clear fence ${streamId}`, error);
+    return false;
+  }
+  return true;
 };
 
 const quiesceInteractiveGenerations = async (user) => {
   const activeJobIds = await GenerationJobManager.getActiveJobIdsForUser(user.id, user.tenantId);
-  if (activeJobIds?.length) {
-    for (const streamId of activeJobIds) {
-      const result = await GenerationJobManager.abortJob(streamId).catch((err) => {
-        logger.warn(`[quiesceInteractiveGenerations] Failed to abort active job ${streamId}`, err);
-        return null;
-      });
-      // A WON abort whose signal provably never left this replica: the peer owner
-      // keeps generating while the shared job is already terminal — invisible to
-      // the next pass's active-set enumeration. Persist an 'abort' finalization
-      // marker as the settlement fence before anything else can observe the
-      // terminal job, then start re-signalling; the marker-settle pass below
-      // clears it once the publish leaves or the owner finishes.
-      if (result?.success && result.signalDelivered === false && result.signalPublished === false) {
-        await GenerationJobManager.registerUserFinalization(
-          user.id,
-          streamId,
-          user.tenantId,
-          'abort',
-        ).catch((err) =>
-          logger.warn(
-            `[quiesceInteractiveGenerations] Failed to fence undelivered abort ${streamId}`,
-            err,
-          ),
-        );
-        await GenerationJobManager.resignalAbort(streamId).catch(() => undefined);
-      }
+  for (const streamId of activeJobIds ?? []) {
+    // FENCE BEFORE THE CAS. An abort transitions the shared job to terminal, which
+    // hides it from every later active-set scan; if the signal then turns out never
+    // to have left this replica, the only thing standing between a still-generating
+    // peer and the destructive cascade is this record. Stamping it first makes a
+    // write failure harmless — nothing has been aborted yet, so refusing simply
+    // defers. (Cleared below the moment the abort is acknowledged, so the common
+    // case leaves nothing behind.)
+    try {
+      await db.addUserAbortFence(user.id, streamId);
+    } catch (error) {
+      logger.warn(
+        `[quiesceInteractiveGenerations] Deferring ${user.id}: could not fence abort of ${streamId}`,
+        error,
+      );
+      return false;
     }
+    const result = await GenerationJobManager.abortJob(streamId).catch((err) => {
+      logger.warn(`[quiesceInteractiveGenerations] Failed to abort active job ${streamId}`, err);
+      return null;
+    });
+    const acknowledged =
+      result == null || result.signalDelivered !== false || result.signalPublished !== false;
+    if (acknowledged) {
+      await db.clearUserAbortFence(user.id, streamId).catch((err) => {
+        logger.warn(`[quiesceInteractiveGenerations] Failed to clear fence ${streamId}`, err);
+      });
+    } else {
+      await GenerationJobManager.resignalAbort(streamId).catch(() => undefined);
+    }
+  }
+  if (activeJobIds?.length) {
     return false;
   }
-  // OWNER-SIDE persistence acknowledgement: an empty active set alone is not
-  // settlement — the success path completes its job fire-and-forget and then runs
-  // the deferred title, whose billed balance/transaction writes land AFTER the job
-  // left the set, and a deletion-side abort can win its CAS without its signal ever
-  // leaving this replica. Markers fence both: 'title' clears when the owner's
-  // writes land; 'abort' clears through settleUndeliveredAbort. Multi-replica
-  // deployments require the Redis job store (see isTopologySafeToArm), where these
-  // markers are cross-replica visible.
-  const pending = await GenerationJobManager.listUserFinalizations(user.id, user.tenantId);
-  if (pending.length === 0) {
+  // Settlement needs positive evidence, not an empty active set: the success path
+  // completes its job fire-and-forget and then runs the deferred title, whose billed
+  // balance/transaction writes land AFTER the job left the set, and a deletion-side
+  // abort can win its CAS without its signal ever leaving this replica. Two fences
+  // cover those: TTL-bounded job-store markers the OWNER clears once its writes land,
+  // and durable (TTL-free, so an outage can never read as settlement) abort fences on
+  // the user document. Multi-replica deployments require the Redis job store (see
+  // isTopologySafeToArm), where the owner markers are cross-replica visible.
+  const pendingOwnerWork = await GenerationJobManager.countUserFinalizations(
+    user.id,
+    user.tenantId,
+  );
+  if (pendingOwnerWork > 0) {
+    logger.info(
+      `[quiesceInteractiveGenerations] ${pendingOwnerWork} owner finalization(s) still landing for ${user.id}`,
+    );
+    return false;
+  }
+  const fences = await db.getUserAbortFences(user.id);
+  if (fences.length === 0) {
     return true;
   }
   let allSettled = true;
-  for (const marker of pending) {
-    if (marker.kind === 'abort') {
-      const settled = await settleUndeliveredAbort(user, marker.streamId);
-      allSettled = allSettled && settled;
-    } else {
-      allSettled = false;
-    }
+  for (const streamId of fences) {
+    const settled = await settleAbortFence(user, streamId);
+    allSettled = allSettled && settled;
   }
   if (!allSettled) {
     logger.info(
-      `[quiesceInteractiveGenerations] finalization(s) still landing for ${user.id}; deferring`,
+      `[quiesceInteractiveGenerations] unacknowledged abort(s) still fencing ${user.id}; deferring`,
     );
   }
   return allSettled;
