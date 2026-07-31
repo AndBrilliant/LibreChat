@@ -44,7 +44,11 @@ jest.mock('@librechat/api', () => ({
   GenerationJobManager: {
     getActiveJobIdsForUser: jest.fn(async () => []),
     abortJob: jest.fn(async () => ({ success: true })),
-    countUserFinalizations: jest.fn(async () => 0),
+    listUserFinalizations: jest.fn(async () => []),
+    registerUserFinalization: jest.fn(async () => undefined),
+    clearUserFinalization: jest.fn(async () => undefined),
+    resignalAbort: jest.fn(async () => ({ delivered: false, published: true })),
+    getJob: jest.fn(async () => null),
   },
   deleteAllSharedLinksWithCleanup: (...args) => mockDeleteAllSharedLinksWithCleanup(...args),
 }));
@@ -340,13 +344,121 @@ describe('deleteUserController - interactive generation quiesce', () => {
     mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
     // Active set already empty — the job completed — but the owner's deferred
     // title (billed balance/transaction writes) has not settled yet.
-    GenerationJobManager.countUserFinalizations.mockResolvedValueOnce(1);
+    GenerationJobManager.listUserFinalizations.mockResolvedValueOnce([
+      { streamId: 'conv-title', kind: 'title' },
+    ]);
 
     await deleteUserController(req, res);
 
     expect(res.status).toHaveBeenCalledWith(503);
     expect(mockDeleteMessages).not.toHaveBeenCalled();
     expect(mockDeleteUserById).not.toHaveBeenCalled();
+  });
+
+  it('fences an abort whose signal never left this replica and re-signals it', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    GenerationJobManager.getActiveJobIdsForUser.mockResolvedValueOnce(['conv-peer']);
+    // The CAS wins on the shared store but delivery AND publication provably
+    // failed: the peer owner keeps generating while the job reads terminal.
+    GenerationJobManager.abortJob.mockResolvedValueOnce({
+      success: true,
+      signalDelivered: false,
+      signalPublished: false,
+    });
+
+    await deleteUserController(req, res);
+
+    // Without the marker, the next pass sees no active job and no fence — the
+    // cascade would run while the peer recreates messages/usage/balances.
+    expect(GenerationJobManager.registerUserFinalization).toHaveBeenCalledWith(
+      'user1',
+      'conv-peer',
+      undefined,
+      'abort',
+    );
+    expect(GenerationJobManager.resignalAbort).toHaveBeenCalledWith('conv-peer');
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockDeleteUserById).not.toHaveBeenCalled();
+  });
+
+  it('clears an abort fence once the owner finished and the job is gone', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    GenerationJobManager.listUserFinalizations.mockResolvedValueOnce([
+      { streamId: 'conv-peer', kind: 'abort' },
+    ]);
+    GenerationJobManager.getJob.mockResolvedValueOnce(null);
+
+    await deleteUserController(req, res);
+
+    // Job absent means the owner finished (or cleaned up): its writes are done,
+    // so the fence clears and the cascade proceeds this same pass.
+    expect(GenerationJobManager.clearUserFinalization).toHaveBeenCalledWith(
+      'user1',
+      'conv-peer',
+      undefined,
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(mockDeleteUserById).toHaveBeenCalled();
+  });
+
+  it('keeps deferring while the republication still cannot leave this replica', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    GenerationJobManager.listUserFinalizations.mockResolvedValueOnce([
+      { streamId: 'conv-peer', kind: 'abort' },
+    ]);
+    GenerationJobManager.getJob.mockResolvedValueOnce({
+      status: 'aborted',
+      userId: 'user1',
+      createdAt: 1000,
+    });
+    GenerationJobManager.resignalAbort.mockResolvedValueOnce({
+      delivered: false,
+      published: false,
+    });
+
+    await deleteUserController(req, res);
+
+    // Fence refreshed, not cleared: the signal is still only on this replica.
+    expect(GenerationJobManager.registerUserFinalization).toHaveBeenCalledWith(
+      'user1',
+      'conv-peer',
+      undefined,
+      'abort',
+    );
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockDeleteUserById).not.toHaveBeenCalled();
+  });
+
+  it('settles the abort fence when the republication finally leaves', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    GenerationJobManager.listUserFinalizations.mockResolvedValueOnce([
+      { streamId: 'conv-peer', kind: 'abort' },
+    ]);
+    GenerationJobManager.getJob.mockResolvedValueOnce({
+      status: 'aborted',
+      userId: 'user1',
+      createdAt: 1000,
+    });
+    // Default resignal mock publishes.
+
+    await deleteUserController(req, res);
+
+    expect(GenerationJobManager.resignalAbort).toHaveBeenCalledWith('conv-peer', 1000);
+    expect(GenerationJobManager.clearUserFinalization).toHaveBeenCalledWith(
+      'user1',
+      'conv-peer',
+      undefined,
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(mockDeleteUserById).toHaveBeenCalled();
   });
 
   it('fails closed when the job store cannot be enumerated', async () => {

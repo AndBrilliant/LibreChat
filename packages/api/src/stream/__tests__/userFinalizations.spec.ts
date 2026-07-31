@@ -42,6 +42,21 @@ describe('InMemoryJobStore user finalizations', () => {
     await expect(store.countUserFinalizations('user-1')).resolves.toBe(0);
   });
 
+  it('lists markers with their kinds', async () => {
+    await store.registerUserFinalization('user-1', 'conv-title');
+    await store.registerUserFinalization('user-1', 'conv-abort', undefined, 'abort');
+
+    const listed = await store.listUserFinalizations('user-1');
+
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        { streamId: 'conv-title', kind: 'title' },
+        { streamId: 'conv-abort', kind: 'abort' },
+      ]),
+    );
+    expect(listed).toHaveLength(2);
+  });
+
   it('keeps other streams live when one is cleared', async () => {
     await store.registerUserFinalization('user-1', 'conv-1');
     await store.registerUserFinalization('user-1', 'conv-2');

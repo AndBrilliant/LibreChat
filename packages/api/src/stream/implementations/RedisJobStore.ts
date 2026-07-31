@@ -13,6 +13,8 @@ import type {
   JobStatusTransition,
   IdempotencyClaimValue,
   IdempotencyClaimResult,
+  UserFinalizationKind,
+  UserFinalization,
 } from '~/stream/interfaces/IJobStore';
 import {
   STEER_ENQUEUE_NOT_RUNNING,
@@ -1487,10 +1489,11 @@ export class RedisJobStore implements IJobStore {
     userId: string,
     streamId: string,
     tenantId?: string,
+    kind: UserFinalizationKind = 'title',
   ): Promise<void> {
     const key = KEYS.userFinalizations(userId, tenantId);
     const expiresAt = Date.now() + USER_FINALIZATION_TTL_MS;
-    await this.redis.hset(key, streamId, String(expiresAt));
+    await this.redis.hset(key, streamId, JSON.stringify({ k: kind, e: expiresAt }));
     // Key-level TTL as the crash backstop; per-field expiry is enforced on read.
     await this.redis.expire(key, Math.ceil(USER_FINALIZATION_TTL_MS / 1000));
   }
@@ -1500,17 +1503,31 @@ export class RedisJobStore implements IJobStore {
   }
 
   async countUserFinalizations(userId: string, tenantId?: string): Promise<number> {
+    return (await this.listUserFinalizations(userId, tenantId)).length;
+  }
+
+  async listUserFinalizations(userId: string, tenantId?: string): Promise<UserFinalization[]> {
     const key = KEYS.userFinalizations(userId, tenantId);
     const entries = await this.redis.hgetall(key);
     if (entries == null) {
-      return 0;
+      return [];
     }
     const now = Date.now();
-    let live = 0;
+    const live: UserFinalization[] = [];
     const stale: string[] = [];
-    for (const [streamId, expiresAt] of Object.entries(entries)) {
-      if (Number(expiresAt) > now) {
-        live++;
+    for (const [streamId, raw] of Object.entries(entries)) {
+      let kind: UserFinalizationKind = 'title';
+      let expiresAt = 0;
+      try {
+        const parsed = JSON.parse(raw) as { k?: UserFinalizationKind; e?: number };
+        kind = parsed.k === 'abort' ? 'abort' : 'title';
+        expiresAt = Number(parsed.e ?? 0);
+      } catch {
+        // Legacy plain-number values (pre-kind markers) were owner title markers.
+        expiresAt = Number(raw);
+      }
+      if (expiresAt > now) {
+        live.push({ streamId, kind });
       } else {
         stale.push(streamId);
       }

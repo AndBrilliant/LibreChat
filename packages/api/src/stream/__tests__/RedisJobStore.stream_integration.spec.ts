@@ -404,8 +404,11 @@ describe('RedisJobStore Integration Tests', () => {
       await peer.initialize();
       const userId = `final-user-${Date.now()}`;
 
-      await owner.registerUserFinalization(userId, 'conv-final-1', 'tenant-x');
+      await owner.registerUserFinalization(userId, 'conv-final-1', 'tenant-x', 'abort');
       await expect(peer.countUserFinalizations(userId, 'tenant-x')).resolves.toBe(1);
+      await expect(peer.listUserFinalizations(userId, 'tenant-x')).resolves.toEqual([
+        { streamId: 'conv-final-1', kind: 'abort' },
+      ]);
       await expect(peer.countUserFinalizations(userId)).resolves.toBe(0);
 
       await owner.clearUserFinalization(userId, 'conv-final-1', 'tenant-x');

@@ -694,6 +694,31 @@ export function createRemoteAgentAuth({
         return;
       }
 
+      // The resolved object can be a pre-barrier snapshot: tenant-policy resolution,
+      // role sync, and updateResolvedUser all await between the lookup and here. A
+      // durable point-read SEQUENCED after the last of those observes any barrier
+      // that committed mid-flight — mirroring the API-key branch and the login
+      // strategies. Fails closed on a null or unreadable document.
+      const resolvedUserId = String(
+        (userResolution.user as { _id?: { toString(): string }; id?: string })._id ??
+          (userResolution.user as { id?: string }).id,
+      );
+      let barrier: { deletionRequestedAt?: Date } | null = null;
+      try {
+        barrier = (await findUser({ _id: resolvedUserId }, 'deletionRequestedAt')) as {
+          deletionRequestedAt?: Date;
+        } | null;
+      } catch {
+        barrier = null;
+      }
+      if (barrier == null || barrier.deletionRequestedAt != null) {
+        logger.warn(
+          `[remoteAgentAuth] Refusing OIDC token for ${resolvedUserId}: deletion barrier raised or unverifiable`,
+        );
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
       req.user = userResolution.user;
       return next();
     } catch (err) {

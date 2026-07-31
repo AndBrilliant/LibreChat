@@ -355,16 +355,23 @@ export function createUserMethods(
    */
   async function markUserDeleting(userId: string): Promise<Date | null> {
     const User = mongoose.models.User;
+    // CACHE BARRIER BEFORE THE DURABLE STAMP. The cached-hit path treats an absent
+    // tombstone as a conclusive fence, so stamping Mongo first opened a window where
+    // a hit between the stamp and the tombstone authenticated a user whose deletion
+    // had already durably begun — and the quiesce could then run before that
+    // request's work existed to discover. Tombstone-first closes it: any request
+    // served after the stamp necessarily observes the tombstone. If the stamp below
+    // then fails (or the process dies), the tombstone ages out in 60s with the user
+    // never barriered — auth degrades to refusals/rechecks for that window, never
+    // the reverse. FAIL CLOSED: a throw here propagates to the caller, which reports
+    // the barrier as not raised and refuses to start the destructive cascade; the
+    // retry is safe because the update below is idempotent.
+    await invalidateAuthUserDocCache(userId, { required: true });
     const updated = await User.findOneAndUpdate(
       { _id: userId, deletionRequestedAt: { $exists: false } },
       { $set: { deletionRequestedAt: new Date() } },
       { new: true },
     ).lean<IUser>();
-    // FAIL CLOSED: the barrier is only real once no cached pre-barrier user document
-    // can still populate req.user. A throw here propagates to the caller, which reports
-    // the barrier as not raised and refuses to start the destructive cascade; the retry
-    // is safe because the update above is idempotent.
-    await invalidateAuthUserDocCache(userId, { required: true });
     if (updated?.deletionRequestedAt != null) {
       return updated.deletionRequestedAt;
     }

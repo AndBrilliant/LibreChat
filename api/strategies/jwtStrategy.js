@@ -23,13 +23,22 @@ const jwtLogin = () =>
             done(null, false, { message: 'Account deletion in progress' });
             return;
           }
+          user.id = user._id.toString();
+          /** Absent on the full doc means local user; null skips getUserPrincipals' fallback lookup */
+          user.idOnTheSource ??= null;
+          if (!user.role) {
+            user.role = SystemRoles.USER;
+            await updateUser(user.id, { role: user.role });
+          }
           // The read above can be a pre-barrier snapshot returned AFTER the barrier
           // committed (the same interleaving the OpenID path rechecks). A second read
-          // SEQUENCED after the first observes any barrier that committed before it.
-          // Deliberately NOT scoped by HTTP method: method is not a safe classifier —
-          // GET handlers persist data too (GET /api/balance upserts via
-          // setBalanceConfig; the role backfill below writes on any method) — so
-          // every request pays the one lean point-read.
+          // SEQUENCED after every await in this callback — including the role
+          // backfill, itself a slow user-document write — observes any barrier that
+          // committed before it; placing it earlier reopened the window for the
+          // backfill's duration. Deliberately NOT scoped by HTTP method: method is
+          // not a safe classifier — GET handlers persist data too (GET /api/balance
+          // upserts via setBalanceConfig) — so every request pays the one lean
+          // point-read.
           let barrier = null;
           try {
             barrier = await getUserById(payload?.id, 'deletionRequestedAt');
@@ -42,13 +51,6 @@ const jwtLogin = () =>
             );
             done(null, false, { message: 'Account deletion in progress' });
             return;
-          }
-          user.id = user._id.toString();
-          /** Absent on the full doc means local user; null skips getUserPrincipals' fallback lookup */
-          user.idOnTheSource ??= null;
-          if (!user.role) {
-            user.role = SystemRoles.USER;
-            await updateUser(user.id, { role: user.role });
           }
           done(null, user);
         } else {

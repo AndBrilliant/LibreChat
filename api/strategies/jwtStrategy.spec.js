@@ -108,6 +108,23 @@ describe('jwtStrategy', () => {
     expect(getUserById).toHaveBeenCalledTimes(2);
   });
 
+  it('rechecks the barrier after the role backfill write', async () => {
+    getUserById
+      // Legacy user with no role: the backfill updateUser is a slow user-document
+      // write AFTER which the barrier can have risen.
+      .mockResolvedValueOnce({ _id: { toString: () => 'user-7' } })
+      .mockResolvedValueOnce({ _id: 'user-7', deletionRequestedAt: new Date() });
+
+    const { user, info } = await invokeVerify({ id: 'user-7' });
+
+    expect(user).toBe(false);
+    expect(info?.message).toMatch(/deletion/i);
+    // The fence is sequenced AFTER the backfill, not before it.
+    expect(updateUser.mock.invocationCallOrder[0]).toBeLessThan(
+      getUserById.mock.invocationCallOrder[1],
+    );
+  });
+
   it('fails closed when the barrier recheck cannot be verified', async () => {
     getUserById
       .mockResolvedValueOnce({ _id: { toString: () => 'user-6' }, role: SystemRoles.USER })

@@ -1195,6 +1195,44 @@ describe('deletion barrier fails closed on cache invalidation', () => {
     expect(tombstoneSet).toBeGreaterThanOrEqual(0);
     expect(firstDelete).toBeGreaterThan(tombstoneSet);
   });
+
+  it('establishes the cache tombstone BEFORE the durable deletion stamp', async () => {
+    process.env.AUTH_USER_CACHE_MODE = 'on';
+    const user = await mongoose.models.User.create({
+      email: `barrier-order-${Date.now()}@test.dev`,
+      name: 'B',
+    });
+    let stampAtTombstoneWrite: unknown = 'unchecked';
+    const tracking = createUserMethods(mongoose, {
+      getCache: () =>
+        ({
+          get: async () => undefined,
+          set: async (key: string) => {
+            if (key.startsWith('auth-user-doc-tombstone:')) {
+              const doc = await mongoose.models.User.findById(user._id)
+                .select('deletionRequestedAt')
+                .lean<{ deletionRequestedAt?: Date }>();
+              stampAtTombstoneWrite = doc?.deletionRequestedAt ?? null;
+            }
+            return true;
+          },
+          delete: async () => true,
+        }) as never,
+    });
+
+    await tracking.markUserDeleting(user._id.toString());
+
+    // A cached hit treats an ABSENT tombstone as a conclusive fence, so the
+    // tombstone must exist before the deletion becomes durable: a stamp-first
+    // ordering left a window where a hit between the two writes authenticated a
+    // user whose deletion had already durably begun — possibly after the quiesce
+    // pass that would have discovered that request's work.
+    expect(stampAtTombstoneWrite).toBeNull();
+    const after = await mongoose.models.User.findById(user._id)
+      .select('deletionRequestedAt')
+      .lean<{ deletionRequestedAt?: Date }>();
+    expect(after?.deletionRequestedAt).toBeInstanceOf(Date);
+  });
 });
 
 describe('schedule deletion is retryable', () => {
