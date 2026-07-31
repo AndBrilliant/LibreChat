@@ -230,6 +230,7 @@ describe('settledAt retention marker', () => {
       scheduleId: schedule.id,
       scheduledFor: when,
       status: 'requires_action',
+      autoDisableAfterFailures: 5,
     });
     expect((await getRun(schedule.id, when)).settledAt).toBeUndefined();
 
@@ -237,6 +238,7 @@ describe('settledAt retention marker', () => {
       scheduleId: schedule.id,
       scheduledFor: when,
       status: 'success',
+      autoDisableAfterFailures: 5,
     });
     expect((await getRun(schedule.id, when)).settledAt).toBeInstanceOf(Date);
   });
