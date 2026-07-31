@@ -528,6 +528,22 @@ const processPendingUserDeletions = async () => {
     // interactive controller's request-scoped context.
     await tenantStorage.run({ tenantId: user.tenantId, userId: user.id }, async () => {
       try {
+        // RE-ESTABLISH the auth-cache fence before cascading. markUserDeleting can
+        // stamp Mongo and then throw on its REQUIRED invalidation; the controller
+        // 503s, but both markers already exist, so this sweep would otherwise run
+        // the cascade behind a fence that was never confirmed — a surviving cached
+        // document could admit a generation that outlives the sweep delay. The call
+        // is idempotent (monotonic stamp) and fail-closed; a throw defers this user
+        // to a later pass with the barrier still up.
+        try {
+          await db.markUserDeleting(user.id);
+        } catch (fenceError) {
+          logger.warn(
+            `[processPendingUserDeletions] Deferring ${user.id}: auth-cache fence could not be established`,
+            fenceError,
+          );
+          return;
+        }
         const quiesced = await quiesceUserSchedules(user.id).catch((error) => {
           logger.error(`[processPendingUserDeletions] Quiesce failed for ${user.id}`, error);
           return false;

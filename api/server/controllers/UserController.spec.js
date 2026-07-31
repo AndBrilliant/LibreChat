@@ -332,6 +332,37 @@ describe('deleteUserController', () => {
     expect(mockRes.send).toHaveBeenCalledWith({ message: 'User deleted' });
   });
 
+  it('sweep defers a user whose auth-cache fence cannot be re-established', async () => {
+    const db = require('~/models');
+    const { processPendingUserDeletions } = require('~/server/controllers/UserController');
+    const userId = new mongoose.Types.ObjectId();
+    db.getUsersPendingDeletion.mockResolvedValue([
+      {
+        _id: userId,
+        email: 'sweep@test.dev',
+        deletionRequestedAt: new Date(Date.now() - 120_000),
+        deletionCommittedAt: new Date(Date.now() - 120_000),
+      },
+    ]);
+    // markUserDeleting can stamp Mongo then throw on its REQUIRED invalidation;
+    // both markers exist, so without this re-assertion the sweep would cascade
+    // behind a fence that was never confirmed.
+    db.markUserDeleting.mockRejectedValue(new Error('redis down'));
+
+    await processPendingUserDeletions();
+
+    expect(db.deleteMessages).not.toHaveBeenCalled();
+    expect(db.deleteUserById).not.toHaveBeenCalled();
+
+    // Fence re-established: the cascade proceeds.
+    db.markUserDeleting.mockResolvedValue(new Date());
+    await processPendingUserDeletions();
+    expect(db.deleteMessages).toHaveBeenCalled();
+    expect(db.deleteUserById).toHaveBeenCalled();
+
+    db.getUsersPendingDeletion.mockResolvedValue([]);
+  });
+
   it('refuses BEFORE the barrier when the deletion commitment cannot be recorded', async () => {
     const db = require('~/models');
     db.markUserDeletionCommitted.mockRejectedValue(new Error('mongo down'));

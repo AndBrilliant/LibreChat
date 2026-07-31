@@ -487,13 +487,15 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         logger.info(
           `[AgentController] Scheduled fire aborted before start; schedule ${scheduleId} no longer active`,
         );
-        // No conversationId: nothing has been persisted for this fire, and the
-        // schedule card links every non-empty lastRun.conversationId — a link here
-        // would send the owner to a chat that does not exist.
+        // No conversationId — and the row's RESERVED id is erased in the same
+        // write: nothing was persisted for this fire, the card links every
+        // non-empty lastRun.conversationId, and recovery replays read the ROW, so
+        // leaving the reserved id there would restore the dead link this omits.
         const outcomeRecorded = await recordScheduleOutcome({
           scheduleId,
           scheduledFor,
           status: 'interrupted',
+          clearConversationId: true,
         });
         // Terminalize as ABORTED, not complete: if the outcome write failed a preserved
         // `complete` job would be mapped to `success` by the schedules reconciler,

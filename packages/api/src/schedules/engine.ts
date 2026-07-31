@@ -92,12 +92,16 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
             const finalize = (
               status: 'success' | 'interrupted' | 'error' | 'requires_action',
               error?: string,
+              opts?: { omitConversationId?: boolean },
             ) =>
               deps.methods.recordRunOutcome({
                 scheduleId: run.scheduleId,
                 scheduledFor: run.scheduledFor,
                 status,
-                conversationId: run.conversationId,
+                // Pre-start aborts have a reserved id but no conversation was ever
+                // created; projecting it gives the card a link to a missing chat.
+                conversationId: opts?.omitConversationId ? undefined : run.conversationId,
+                clearConversationId: opts?.omitConversationId,
                 error,
                 autoDisableAfterFailures: runLimits.autoDisableAfterFailures,
               });
@@ -164,7 +168,9 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
               if (hasAbortInFlight(run, Date.now())) {
                 continue;
               }
-              await finalize('interrupted');
+              await finalize('interrupted', undefined, {
+                omitConversationId: jobState?.createdEventEmitted !== true,
+              });
               await clearRetainedJob();
               continue;
             }

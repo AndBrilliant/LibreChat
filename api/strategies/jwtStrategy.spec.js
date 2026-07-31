@@ -65,6 +65,21 @@ describe('jwtStrategy', () => {
     expect(user.idOnTheSource).toBe('entra-oid-123');
   });
 
+  it('refuses a user whose account deletion has begun', async () => {
+    getUserById.mockResolvedValue({
+      _id: { toString: () => 'user-3' },
+      role: SystemRoles.USER,
+      deletionRequestedAt: new Date(),
+    });
+
+    const { user, info } = await invokeVerify({ id: 'user-3' });
+
+    // The destructive cascade (or its deferred sweep) is coming: an interactive
+    // job admitted here would persist messages and usage for the deleted account.
+    expect(user).toBe(false);
+    expect(info?.message).toMatch(/deletion/i);
+  });
+
   it('returns false when no user is found', async () => {
     getUserById.mockResolvedValue(null);
 

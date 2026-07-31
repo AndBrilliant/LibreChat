@@ -42,7 +42,11 @@ export function cadenceIntervalMinutes(cadence: TScheduleCadence): number {
   if (cadence.frequency === 'daily' || cadence.frequency === 'weekdays') {
     return 24 * 60;
   }
-  const days = cadence.daysOfWeek?.length ? [...cadence.daysOfWeek] : [WEEKLY_DEFAULT_DAY];
+  // Deduped defensively: the payload schema normalizes new writes, but a legacy
+  // stored [1, 1] would otherwise read as a zero-day gap and fail every floor.
+  const days = cadence.daysOfWeek?.length
+    ? Array.from(new Set(cadence.daysOfWeek))
+    : [WEEKLY_DEFAULT_DAY];
   if (days.length <= 1) {
     return 7 * 24 * 60;
   }

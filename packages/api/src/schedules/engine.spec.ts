@@ -349,6 +349,34 @@ describe('reconciliation abort fence', () => {
     expect(clearReconciledJob).toHaveBeenCalled();
   });
 
+  it('omits the conversation link when the aborted job never started', async () => {
+    const methods = makeMethods(makeClaimedSchedule());
+    (methods.getRunsForReconciliation as jest.Mock).mockResolvedValue([abortedRun(31 * 60_000)]);
+    const preStartAbortedJob = async () => ({
+      status: 'aborted',
+      scheduleId: 'sched-1',
+      scheduledFor: scheduledFor.toISOString(),
+      createdEventEmitted: false,
+    });
+    await tickOnce(
+      makeDeps(methods, {
+        getJobStatus: preStartAbortedJob,
+        clearReconciledJob: jest.fn(async () => undefined),
+      }),
+    );
+
+    // A pre-start abort reserved an id but no conversation ever came to exist;
+    // projecting it hands the card a link to a missing chat, and the row's
+    // reserved id is erased so the crash-retry replay cannot restore it either.
+    expect(methods.recordRunOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'interrupted',
+        conversationId: undefined,
+        clearConversationId: true,
+      }),
+    );
+  });
+
   /** Account-deletion quiesce DELETES the aborted job, so post-abort absence carries
    *  the same fence: the orphan branch must not settle a run whose owner is still
    *  unwinding its persistence. */

@@ -26,7 +26,12 @@ export const scheduleCadenceSchema = z.object({
   frequency: z.enum(scheduleFrequencies),
   hour: z.number().int().min(0).max(23),
   minute: z.number().int().min(0).max(59),
-  daysOfWeek: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+  daysOfWeek: z
+    .array(z.number().int().min(0).max(6))
+    .min(1)
+    .max(7)
+    .transform((days) => Array.from(new Set(days)))
+    .optional(),
 });
 export type TScheduleCadence = z.infer<typeof scheduleCadenceSchema>;
 

@@ -81,6 +81,8 @@ export interface RecordScheduleOutcomeInput {
   scheduledFor?: string | Date;
   status: ScheduleRunOutcomeStatus;
   conversationId?: string;
+  /** Erase the row's reserved conversationId (pre-start abort: no conversation exists). */
+  clearConversationId?: boolean;
   error?: string;
 }
 
@@ -454,7 +456,12 @@ export function createSchedulesService(
       if (job == null) {
         return null;
       }
-      return { status: job.status, scheduleId: job.scheduleId, scheduledFor: job.scheduledFor };
+      return {
+        status: job.status,
+        scheduleId: job.scheduleId,
+        scheduledFor: job.scheduledFor,
+        createdEventEmitted: job.createdEventEmitted === true,
+      };
     },
     abortScheduledJob: async (conversationId, identity, options) => {
       const store = GenerationJobManager.getJobStore();
@@ -694,6 +701,7 @@ export function createSchedulesService(
     scheduledFor,
     status,
     conversationId,
+    clearConversationId,
     error,
   }: RecordScheduleOutcomeInput): Promise<boolean> {
     if (!scheduleId || !scheduledFor) {
@@ -710,6 +718,7 @@ export function createSchedulesService(
           scheduleId,
           scheduledFor: new Date(scheduledFor),
           status,
+          clearConversationId,
           conversationId,
           error,
           autoDisableAfterFailures: limits.autoDisableAfterFailures,

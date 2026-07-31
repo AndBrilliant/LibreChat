@@ -136,10 +136,10 @@ async function gracefulExit(code = 0) {
     // Only a running server settles these — by draining them (app deletion) or by
     // reconciling an abandoned run whose lease expired.
     console.yellow(
-      'Delete the account through the app instead, which drains active runs. If the server is',
+      'The deletion barrier is up, so this user can no longer sign in. Start the server (if',
     );
     console.yellow(
-      'already stopped, start it and let reconciliation settle the abandoned run, then retry.',
+      'stopped) and let reconciliation settle the abandoned run, then re-run this script.',
     );
     return gracefulExit(1);
   }

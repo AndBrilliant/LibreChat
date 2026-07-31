@@ -103,6 +103,10 @@ export interface RecordRunOutcomeParams {
     'success' | 'error' | 'requires_action' | 'interrupted' | 'skipped_balance' | 'skipped_overlap'
   >;
   conversationId?: string;
+  /** Erase the run row's RESERVED conversationId in the same terminal write: a
+   *  pre-start abort reserved an id but never created the conversation, and any
+   *  recovery replay that reads the row would otherwise project a dead link. */
+  clearConversationId?: boolean;
   error?: string;
   durationMs?: number;
   autoDisableAfterFailures: number;
@@ -1147,14 +1151,16 @@ export function createScheduleMethods(mongoose: typeof import('mongoose')): Sche
           $set: {
             status: params.status,
             bookkept: false,
-            ...(params.conversationId ? { conversationId: params.conversationId } : {}),
+            ...(params.conversationId && !params.clearConversationId
+              ? { conversationId: params.conversationId }
+              : {}),
             ...(params.error ? { error: params.error } : {}),
             ...(params.durationMs != null ? { durationMs: params.durationMs } : {}),
           },
           // SETTLEMENT: a terminal outcome is the generation owner confirming the run
           // actually stopped, so this is the ONLY place the global capacity slot is
           // released. An abort request alone does not free it (see requestRunAbort).
-          $unset: { capacitySlot: 1 },
+          $unset: { capacitySlot: 1, ...(params.clearConversationId ? { conversationId: 1 } : {}) },
         },
         { new: false },
       )

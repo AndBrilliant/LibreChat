@@ -185,6 +185,9 @@ export interface JobState {
   status: string;
   scheduleId?: string;
   scheduledFor?: string;
+  /** Whether the generation ever emitted its created event — false means a
+   *  pre-start abort whose conversation never came to exist. */
+  createdEventEmitted?: boolean;
 }
 
 export interface FireResult {

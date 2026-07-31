@@ -306,6 +306,11 @@ describe('cadenceIntervalMinutes', () => {
     expect(cadenceIntervalMinutes(cadence({ frequency: 'weekly', daysOfWeek: [1, 3, 5] }))).toBe(
       2 * 24 * 60,
     );
+    // duplicates are one selection, not a zero-day gap: [1, 1] fires once a week,
+    // and reading it as 0 minutes rejected the schedule against every valid floor
+    expect(cadenceIntervalMinutes(cadence({ frequency: 'weekly', daysOfWeek: [1, 1] }))).toBe(
+      7 * 24 * 60,
+    );
     // wrap-around: Sun + Sat are 1 day apart across the week boundary
     expect(cadenceIntervalMinutes(cadence({ frequency: 'weekly', daysOfWeek: [0, 6] }))).toBe(
       24 * 60,

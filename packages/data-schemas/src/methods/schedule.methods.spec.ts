@@ -381,6 +381,43 @@ describe('recordRunOutcome', () => {
     expect(updated.lastRun?.conversationId).toBe('convo-paused');
   });
 
+  it('clearConversationId erases the reserved id so replays cannot restore a dead link', async () => {
+    const schedule = await methods.createSchedule(scheduleData());
+    await methods.insertScheduleRun(
+      runData(schedule, { scheduledFor, conversationId: 'reserved-but-never-created' }),
+    );
+
+    // Pre-start abort: an id was reserved but no conversation ever came to exist.
+    await methods.recordRunOutcome({
+      scheduleId: schedule.id,
+      scheduledFor,
+      status: 'interrupted',
+      clearConversationId: true,
+      autoDisableAfterFailures: 3,
+    });
+
+    const run = await getRun(schedule.id, scheduledFor);
+    expect(run.conversationId).toBeUndefined();
+    const updated = await getSchedule(schedule.id);
+    expect(updated.lastRun?.conversationId).toBeUndefined();
+
+    // The crash-retry replay reads the ROW; with the id erased it has nothing
+    // to project, so the dead link cannot be restored.
+    await ScheduleRun.updateOne(
+      { scheduleId: schedule.id, scheduledFor },
+      { $set: { bookkept: false } },
+    );
+    await methods.finalizeBookkeeping({
+      scheduleId: schedule.id,
+      scheduledFor,
+      status: 'interrupted',
+      conversationId: run.conversationId,
+      autoDisableAfterFailures: 3,
+    });
+    const replayed = await getSchedule(schedule.id);
+    expect(replayed.lastRun?.conversationId).toBeUndefined();
+  });
+
   it('re-affirmed pauses keep the ORIGINAL fire time and do not churn updatedAt', async () => {
     const schedule = await methods.createSchedule(scheduleData());
     const originalFiredAt = new Date('2026-07-20T12:00:02Z');
