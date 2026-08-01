@@ -1,7 +1,7 @@
 import type { ScheduleEngineDeps, ScheduleLimits, ScheduleUserContext } from './types';
 import type { FireableSchedule } from './types';
 import { withCapacitySlot } from './capacity';
-import { fireSchedule } from './fire';
+import { buildFireClientRequestId, fireSchedule } from './fire';
 
 const OWNER: ScheduleUserContext = { id: 'user-1', tenantId: 't1', role: 'USER' };
 const LIMITS: ScheduleLimits = {
@@ -213,6 +213,49 @@ const sseDenyResponse = () =>
 const dueAt = () => new Date(Date.now() - 60_000);
 
 afterEach(() => jest.restoreAllMocks());
+
+/**
+ * The chat route validates `clientRequestId` against `/^[A-Za-z0-9:_-]{1,128}$/`
+ * (CLIENT_REQUEST_ID_PATTERN in api/server/controllers/agents/request.js). An id
+ * outside that charset makes the route answer 400 INVALID_CLIENT_REQUEST_ID, which
+ * fails EVERY fire — so the encoding is a contract, not a formatting choice.
+ */
+describe('buildFireClientRequestId', () => {
+  const ROUTE_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
+
+  it('stays within the charset the chat route accepts', () => {
+    const id = buildFireClientRequestId(
+      'sched_bf55e051-b26d-4ccc-b96c-93ffaafe1a5b',
+      new Date('2026-08-01T14:05:55.132Z'),
+    );
+
+    // A raw ISO instant carries a '.' in its milliseconds, which the route rejects.
+    expect(id).not.toContain('.');
+    expect(id).toMatch(ROUTE_PATTERN);
+  });
+
+  it('is deterministic per occurrence and distinct across occurrences', () => {
+    const scheduleId = 'sched_bf55e051-b26d-4ccc-b96c-93ffaafe1a5b';
+    const first = new Date('2026-08-01T14:05:55.132Z');
+    const second = new Date('2026-08-01T15:05:55.132Z');
+
+    expect(buildFireClientRequestId(scheduleId, first)).toBe(
+      buildFireClientRequestId(scheduleId, new Date(first.getTime())),
+    );
+    expect(buildFireClientRequestId(scheduleId, first)).not.toBe(
+      buildFireClientRequestId(scheduleId, second),
+    );
+  });
+
+  it('stays inside the 128-character cap', () => {
+    expect(
+      buildFireClientRequestId(
+        'sched_bf55e051-b26d-4ccc-b96c-93ffaafe1a5b',
+        new Date('2026-08-01T14:05:55.132Z'),
+      ).length,
+    ).toBeLessThanOrEqual(128);
+  });
+});
 
 describe('fireSchedule', () => {
   it('fires the happy path and records fire details', async () => {

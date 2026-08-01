@@ -9,8 +9,19 @@ const FIRE_REQUEST_TIMEOUT_MS = 30_000;
 /** Consecutive balance skips (pre-fire or mid-generation) before auto-disable. */
 export const BALANCE_SKIP_DISABLE_THRESHOLD: number = 5;
 
+/**
+ * Per-occurrence idempotency key for the loopback fire.
+ *
+ * Constrained to `[A-Za-z0-9:_-]` because the chat route validates
+ * `clientRequestId` against exactly that charset (CLIENT_REQUEST_ID_PATTERN in
+ * `api/server/controllers/agents/request.js`) — a raw ISO instant carries a `.`
+ * in its milliseconds and every fire was rejected with 400
+ * INVALID_CLIENT_REQUEST_ID. The instant is kept human-readable in logs with the
+ * millisecond separator swapped for `-`; the value is generated here and never
+ * parsed back, so the encoding only has to be deterministic per occurrence.
+ */
 export function buildFireClientRequestId(scheduleId: string, scheduledFor: Date): string {
-  return `sched:${scheduleId}:${scheduledFor.toISOString()}`;
+  return `sched:${scheduleId}:${scheduledFor.toISOString().replace('.', '-')}`;
 }
 
 /**
