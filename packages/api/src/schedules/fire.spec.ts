@@ -1,7 +1,7 @@
 import type { ScheduleEngineDeps, ScheduleLimits, ScheduleUserContext } from './types';
 import type { FireableSchedule } from './types';
-import { withCapacitySlot } from './capacity';
 import { buildFireClientRequestId, fireSchedule } from './fire';
+import { withCapacitySlot } from './capacity';
 
 const OWNER: ScheduleUserContext = { id: 'user-1', tenantId: 't1', role: 'USER' };
 const LIMITS: ScheduleLimits = {
