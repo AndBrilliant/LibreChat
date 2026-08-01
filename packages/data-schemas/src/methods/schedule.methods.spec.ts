@@ -25,6 +25,13 @@ let ScheduleRun: Model<IScheduleRunDocument>;
 let methods: ScheduleMethods;
 let userMethods: ReturnType<typeof createUserMethods>;
 
+/** Standing up a real in-memory MongoDB plus index builds routinely outruns the
+ *  15s default hook timeout when the suite runs alongside the rest of the package
+ *  (and on a cold binary cache), which failed all 115 tests on an unrelated-looking
+ *  beforeAll timeout. The work itself takes ~2s idle; this is headroom, not a
+ *  slow expectation. */
+const DB_SETUP_TIMEOUT_MS = 60_000;
+
 beforeAll(async () => {
   mongoServer = await MongoMemoryServer.create();
   await mongoose.connect(mongoServer.getUri());
@@ -35,12 +42,12 @@ beforeAll(async () => {
   await ScheduleRun.init();
   methods = createScheduleMethods(mongoose);
   userMethods = createUserMethods(mongoose);
-});
+}, DB_SETUP_TIMEOUT_MS);
 
 afterAll(async () => {
   await mongoose.disconnect();
   await mongoServer.stop();
-});
+}, DB_SETUP_TIMEOUT_MS);
 
 beforeEach(async () => {
   await Schedule.deleteMany({});

@@ -1185,10 +1185,13 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
       if (partialResponseSaved || !aggregatedContent || aggregatedContent.length === 0) {
         return;
       }
-      // Never-rejecting: settlement awaits completion, not success.
+      // Never-rejecting: settlement awaits completion, not success. Tracked rather
+      // than awaited here so a disconnect cannot hold the emitter, and RETURNED so a
+      // caller that does await the handler observes the same completion.
       partialSavePromise = savePartialOnDisconnect(aggregatedContent).catch((error) => {
         logger.error('[ResumableAgentController] Disconnect-partial save failed:', error);
       });
+      return partialSavePromise;
     });
 
     /** @type {{ client: TAgentClient; userMCPAuthMap?: Record<string, Record<string, string>> }} */

@@ -39,12 +39,20 @@ export interface ScheduleFireClaims {
   manual: boolean;
 }
 
-/** Verifies a request's schedule-fire token and reports which kind of fire it is. */
-export const readScheduleFireClaims = (req: {
-  headers: Record<string, string | string[] | undefined>;
+/**
+ * Verifies a request's schedule-fire token and reports which kind of fire it is.
+ *
+ * `headers` is optional on purpose: the exemption helpers below are also reached
+ * from in-process teardown paths (a HITL pause releasing its concurrency slot)
+ * whose request object is a synthetic shim with no headers at all. A missing
+ * header set simply means "not a scheduled fire" — reading it unguarded threw
+ * and took the pause path down with it.
+ */
+export const readScheduleFireClaims = (req?: {
+  headers?: Record<string, string | string[] | undefined>;
 }): ScheduleFireClaims => {
   const none: ScheduleFireClaims = { scheduled: false, manual: false };
-  if (req.headers['x-lc-scheduled'] !== '1') {
+  if (req?.headers?.['x-lc-scheduled'] !== '1') {
     return none;
   }
   const auth = req.headers.authorization;
@@ -74,13 +82,14 @@ export const isScheduleFireRequest = (req: {
  * slower middleware chain, so the captured decision wins when present.
  */
 interface ClassifiedFireRequest {
-  headers: Record<string, string | string[] | undefined>;
+  /** Absent on the synthetic request shims used by in-process teardown paths. */
+  headers?: Record<string, string | string[] | undefined>;
   _isScheduledFire?: boolean;
   _isManualScheduledFire?: boolean;
 }
 
-const classify = (req: ClassifiedFireRequest): ScheduleFireClaims =>
-  typeof req._isScheduledFire === 'boolean'
+const classify = (req?: ClassifiedFireRequest): ScheduleFireClaims =>
+  typeof req?._isScheduledFire === 'boolean'
     ? { scheduled: req._isScheduledFire, manual: req._isManualScheduledFire === true }
     : readScheduleFireClaims(req);
 
@@ -93,7 +102,8 @@ const classify = (req: ClassifiedFireRequest): ScheduleFireClaims =>
  * else's. Manual runs are IP-limited at `/api/schedules/:id/run` instead, where the real
  * address is still on the request.
  */
-export const exemptFromIpLimiter = (req: ClassifiedFireRequest): boolean => classify(req).scheduled;
+export const exemptFromIpLimiter = (req?: ClassifiedFireRequest): boolean =>
+  classify(req).scheduled;
 
 /**
  * Whether the USER-based message limiter should be SKIPPED.
@@ -104,7 +114,7 @@ export const exemptFromIpLimiter = (req: ClassifiedFireRequest): boolean => clas
  * this limiter keys on the authenticated id, which the fire token carries intact across
  * the loopback — so it is the one that actually bounds manual volume.
  */
-export const exemptFromUserLimiter = (req: ClassifiedFireRequest): boolean => {
+export const exemptFromUserLimiter = (req?: ClassifiedFireRequest): boolean => {
   const claims = classify(req);
   return claims.scheduled && !claims.manual;
 };
@@ -121,5 +131,5 @@ export const exemptFromUserLimiter = (req: ClassifiedFireRequest): boolean => {
  * and hand-writing the predicate at each let them drift: the acquire became manual-aware
  * while a release did not, leaking a slot on every paused Run Now.
  */
-export const exemptFromConcurrencyLimiter = (req: ClassifiedFireRequest): boolean =>
+export const exemptFromConcurrencyLimiter = (req?: ClassifiedFireRequest): boolean =>
   exemptFromUserLimiter(req);
