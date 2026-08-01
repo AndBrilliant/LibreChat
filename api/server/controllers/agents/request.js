@@ -1,4 +1,4 @@
-const { logger } = require('@librechat/data-schemas');
+const { logger, tenantStorage } = require('@librechat/data-schemas');
 const { v5: uuidv5 } = require('uuid');
 const {
   Constants,
@@ -360,6 +360,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
     : undefined;
 
   const userId = req.user.id;
+  const tenantId = req.user.tenantId;
   const rawClientRequestId = req.body?.clientRequestId;
   if (
     rawClientRequestId != null &&
@@ -1141,15 +1142,22 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           partialMessage.agent_id = req.body.agent_id;
         }
 
-        const savedPartialMessage = await saveMessage(
-          {
-            userId: req?.user?.id,
-            isTemporary: req?.body?.isTemporary,
-            interfaceConfig: req?.config?.interfaceConfig,
-          },
-          partialMessage,
-          { context: 'api/server/controllers/agents/request.js - partial response on disconnect' },
-        );
+        const savePartialMessage = () =>
+          saveMessage(
+            {
+              userId,
+              isTemporary: req?.body?.isTemporary,
+              interfaceConfig: req?.config?.interfaceConfig,
+            },
+            partialMessage,
+            {
+              context: 'api/server/controllers/agents/request.js - partial response on disconnect',
+            },
+          );
+
+        const savedPartialMessage = tenantId
+          ? await tenantStorage.run({ tenantId, userId }, savePartialMessage)
+          : await savePartialMessage();
         if (!savedPartialMessage) {
           throw new Error('Partial response could not be persisted after disconnect');
         }
@@ -1915,7 +1923,11 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         }
 
         const shouldGenerateTitle =
-          addTitle && parentMessageId === Constants.NO_PARENT && isNewConvo && !terminalWasAborted;
+          addTitle &&
+          parentMessageId === Constants.NO_PARENT &&
+          isNewConvo &&
+          !terminalWasAborted &&
+          !preemptIncomplete;
         /** Whether a scheduled run already ran its deferred title pre-settlement,
          *  so the post-settle tail must not start a second one. */
         let scheduledTitleAwaited = false;
@@ -1981,10 +1993,11 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           );
         }
 
-        // If the user stopped this turn, cancel the title BEFORE unblocking its
-        // persistence wait — otherwise resolving `convoReady` lets the title task
-        // resume and save before the later abort runs.
-        if (terminalWasAborted) {
+        // If the user stopped this turn — or an empty preempt boundary truncated
+        // it, which persists under the same honest `unfinished` contract — cancel
+        // the title BEFORE unblocking its persistence wait; otherwise resolving
+        // `convoReady` lets the title task resume and save before the later abort runs.
+        if (terminalWasAborted || preemptIncomplete) {
           titleAbortController.abort();
         } else {
           job.abortController.signal.removeEventListener('abort', abortTitleOnJobAbort);

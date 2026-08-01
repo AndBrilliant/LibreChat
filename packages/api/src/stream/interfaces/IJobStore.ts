@@ -738,7 +738,6 @@ export interface IJobStore {
 
   /** Count live (unexpired) finalizations for a user. */
   countUserFinalizations(userId: string, tenantId?: string): Promise<number>;
-
 }
 
 /**
@@ -945,7 +944,6 @@ export interface IJobStoreV2 extends IJobStore {
    * @returns Array of conversation IDs with active jobs
    */
   getActiveJobIdsByUser(userId: string, tenantId?: string): Promise<string[]>;
-
 
   // ===== Content State Methods =====
   // These methods manage volatile content state tied to each job.

@@ -14,7 +14,6 @@ import type {
   TMessageContentParts,
   TContextUsageEvent,
   TTokenUsageEvent,
-  TPendingSteer,
   Agents,
 } from 'librechat-data-provider';
 import type { StandardGraph } from '@librechat/agents';

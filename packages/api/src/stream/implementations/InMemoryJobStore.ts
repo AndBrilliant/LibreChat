@@ -38,7 +38,6 @@ import {
   RecoveredSteerPayloadMismatchError,
 } from '~/stream/SteerRecovery';
 import { toPendingSteer } from '~/stream/SteeringLifecycle';
-import { nextGenerationStamp } from '../generationStamp';
 
 /** Recovery window for parked steers (mirrors Redis's completed-job TTL). */
 export const PARKED_STEERS_TTL_MS: number = 5 * 60 * 1000;
@@ -115,9 +114,6 @@ function isValidGenerationProtocolMarker(value: unknown): boolean {
   return value == null || value === 1 || value === 2;
 }
 
-/** How long a stream's generation stamp is remembered after its job is gone (24h,
- *  matching RedisJobStore's generation-key TTL). */
-const GENERATION_STAMP_RETENTION_MS = 24 * 60 * 60 * 1000;
 /** Backstop for a finalization whose owner crashed between register and clear:
  *  deletion quiescing defers on live markers, so they must age out. */
 const USER_FINALIZATION_TTL_MS = 5 * 60 * 1000;
