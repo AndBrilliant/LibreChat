@@ -8,6 +8,7 @@ import {
   EToolResources,
   paramEndpoints,
   isAgentsEndpoint,
+  AgentCapabilities,
   replaceSpecialVars,
   providerEndpointMap,
 } from 'librechat-data-provider';
@@ -427,7 +428,8 @@ export interface InitializeAgentParams {
   /**
    * Whether the `run_in_background` capability is enabled for this run. When
    * true, tools the agent opted in via `tool_options[name].run_in_background`
-   * get a `run_in_background` schema param and the `check_background_task` poll
+   * (plus the background-native code pair, unless explicitly opted out) get a
+   * `run_in_background` schema param and the `check_background_task` poll
    * tool is registered.
    */
   backgroundToolsAvailable?: boolean;
@@ -1112,6 +1114,22 @@ export async function initializeAgent(
    */
   const agentRequestsCodeExec = (agent.tools ?? []).includes(Tools.execute_code);
   const effectiveCodeEnvAvailable = params.codeEnvAvailable === true && agentRequestsCodeExec;
+  /**
+   * Capability marker → definition names its registration produced this run,
+   * reported by the registrars themselves. `tool_options` entries keyed by a
+   * marker (`execute_code`, `memory`, `skills`) — from a model-spec selection
+   * or a hand-edited saved agent — resolve onto exactly these names in the
+   * background/intent passes, so the projection cannot drift from what
+   * actually got registered.
+   */
+  const capabilityToolNames = new Map<string, readonly string[]>();
+  const recordCapabilityToolNames = (capability: string, toolNames: readonly string[]): void => {
+    if (toolNames.length === 0) {
+      return;
+    }
+    const existing = capabilityToolNames.get(capability);
+    capabilityToolNames.set(capability, existing ? [...existing, ...toolNames] : toolNames);
+  };
   /** Per-agent stateful-session truth: the admin capability AND the agent's
    *  own builder opt-in AND a working code env. Resolved once here so the
    *  registered bash description, the tool factories, and `createRun`'s
@@ -1130,6 +1148,7 @@ export async function initializeAgent(
       statefulSessions: effectiveStatefulSessions,
     });
     toolDefinitions = codeExecResult.toolDefinitions;
+    recordCapabilityToolNames(AgentCapabilities.execute_code, codeExecResult.toolNames);
   } else if (agentRequestsCodeExec) {
     /**
      * Agent asked for `execute_code` but the admin-level gate is off —
@@ -1160,6 +1179,7 @@ export async function initializeAgent(
       validKeys: req.config?.memory?.validKeys,
     });
     toolDefinitions = memoryResult.toolDefinitions;
+    recordCapabilityToolNames(AgentCapabilities.memory, memoryResult.toolNames);
     appendAdditionalInstructions(agent, memoryToolUsageGuard);
   } else if (agentRequestsMemory) {
     logger.debug(
@@ -1176,6 +1196,7 @@ export async function initializeAgent(
       enableToolOutputReferences: effectiveCodeEnvAvailable,
     });
     toolDefinitions = skillReadResult.toolDefinitions;
+    recordCapabilityToolNames(AgentCapabilities.skills, skillReadResult.toolNames);
   }
 
   if (effectiveCodeEnvAvailable || skillAuthoringAvailable) {
@@ -1185,6 +1206,14 @@ export async function initializeAgent(
       includeSkillFileInstructions: skillAuthoringAvailable,
     });
     toolDefinitions = fileAuthoringResult.toolDefinitions;
+    /** File authoring is owned by whichever capability switched it on —
+     *  both, when both are active, so either marker's selection governs. */
+    if (effectiveCodeEnvAvailable) {
+      recordCapabilityToolNames(AgentCapabilities.execute_code, fileAuthoringResult.toolNames);
+    }
+    if (skillAuthoringAvailable) {
+      recordCapabilityToolNames(AgentCapabilities.skills, fileAuthoringResult.toolNames);
+    }
   }
 
   let intentToolNames: string[] | undefined;
@@ -1193,7 +1222,8 @@ export async function initializeAgent(
    * Inject the `run_in_background` param into eligible opted-in tools and
    * register the `check_background_task` poll tool. Runs after all built-in
    * tool registration so the full, final `toolDefinitions` set is considered.
-   * Opt-in is per-tool via `tool_options` for both saved and ephemeral agents.
+   * Opt-in is per-tool via `tool_options` for both saved and ephemeral agents;
+   * the code-execution pair is background-native and needs no opt-in.
    */
   let backgroundToolNames: string[] | undefined;
   if (params.backgroundToolsAvailable === true) {
@@ -1214,6 +1244,7 @@ export async function initializeAgent(
       toolDefinitions,
       toolRegistry,
       toolOptions: agent.tool_options,
+      capabilityToolNames,
       /** Tools of ephemeral request-scoped MCP servers (runtime body
        *  placeholders) never get the param: their connection dies at request
        *  end, so the executor would only downgrade the call to foreground.
@@ -1324,6 +1355,7 @@ export async function initializeAgent(
     skillCount = skillResult.skillCount;
     executableSkillIds = skillResult.activeSkillIds;
     activeSkillNames = skillResult.activeSkillNames;
+    recordCapabilityToolNames(AgentCapabilities.skills, skillResult.toolNames);
   }
 
   /**
@@ -1343,6 +1375,7 @@ export async function initializeAgent(
       toolDefinitions,
       toolRegistry,
       toolOptions: agent.tool_options,
+      capabilityToolNames,
     });
     toolDefinitions = intentResult.toolDefinitions;
     if (intentResult.intentToolNames.length > 0) {
@@ -1354,6 +1387,7 @@ export async function initializeAgent(
     toolRegistry,
     toolOptions: agent.tool_options,
     capabilityEnabled: params.toolIntentsAvailable === true,
+    capabilityToolNames,
   });
   toolDefinitions = intentSanitized.toolDefinitions;
 

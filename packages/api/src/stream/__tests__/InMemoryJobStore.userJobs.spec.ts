@@ -11,17 +11,18 @@ describe('InMemoryJobStore user-job membership across owner changes', () => {
     await store.destroy();
   });
 
-  it('scrubs the previous owner when a replacement changes owners', async () => {
+  it('refuses a replacement that would change owners', async () => {
     await store.createJob('conv-shared', 'user-a');
     await expect(store.getActiveJobIdsByUser('user-a')).resolves.toEqual(['conv-shared']);
 
-    // The stream id is client-supplied, so a replacement can belong to a DIFFERENT
-    // user. The previous owner's account deletion must not enumerate (and abort)
-    // the new owner's live generation.
-    await store.createJob('conv-shared', 'user-b');
+    // The stream id is client-supplied, so a replacement could otherwise hand the
+    // conversation to a DIFFERENT user and leave the previous owner's membership
+    // pointing at it — their account deletion would then abort the new owner's live
+    // generation. The store refuses the cross-owner replacement outright.
+    await expect(store.createJob('conv-shared', 'user-b')).rejects.toThrow(/owner mismatch/i);
 
-    await expect(store.getActiveJobIdsByUser('user-a')).resolves.toEqual([]);
-    await expect(store.getActiveJobIdsByUser('user-b')).resolves.toEqual(['conv-shared']);
+    await expect(store.getActiveJobIdsByUser('user-a')).resolves.toEqual(['conv-shared']);
+    await expect(store.getActiveJobIdsByUser('user-b')).resolves.toEqual([]);
   });
 
   it('refuses stale membership whose job now belongs to another owner', async () => {

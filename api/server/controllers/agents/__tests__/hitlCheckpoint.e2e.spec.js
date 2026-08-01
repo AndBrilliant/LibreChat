@@ -58,6 +58,7 @@ const {
   deleteAgentCheckpoint,
   buildHITLRunWiring,
   resolveToolApprovalPolicy,
+  LIBRECHAT_CHECKPOINT_NAMESPACE_KEY,
   __resetCheckpointerForTests,
 } = require('@librechat/api');
 const ResumeAgentController = require('~/server/controllers/agents/resume');
@@ -108,9 +109,14 @@ async function buildHitlRun({ saver, conversationId, responses, toolCalls, runId
   return run;
 }
 
-const runConfig = (conversationId) => ({
+const runConfig = (conversationId, checkpointNamespace = '') => ({
   runName: 'AgentRun',
-  configurable: { thread_id: conversationId, user_id: USER_ID },
+  configurable: {
+    thread_id: conversationId,
+    checkpoint_ns: '',
+    [LIBRECHAT_CHECKPOINT_NAMESPACE_KEY]: checkpointNamespace,
+    user_id: USER_ID,
+  },
   streamMode: 'values',
   version: 'v2',
 });
@@ -206,6 +212,13 @@ describe('HITL checkpoint lifecycle (full wiring)', () => {
   test('pause → approve over the REAL /resume controller → tool runs once → checkpoint pruned', async () => {
     const conversationId = `e2e-resume-${Date.now()}`;
     const responseMessageId = 'resp-pause-1';
+    // Production creates the v2 generation before compiling/running the graph,
+    // then scopes every checkpoint operation to that immutable generation.
+    const job = await GenerationJobManager.createJob(conversationId, USER_ID, conversationId, {
+      initialMetadata: { generationProtocolVersion: 2 },
+    });
+    const checkpointNamespace = job.metadata.checkpointNamespace;
+    expect(checkpointNamespace).toBe(String(job.createdAt));
 
     // --- Turn 1: the model calls the gated tool → PreToolUse 'ask' → interrupt. ---
     const run = await buildHitlRun({
@@ -217,7 +230,7 @@ describe('HITL checkpoint lifecycle (full wiring)', () => {
     });
     await run.processStream(
       { messages: [new HumanMessage('run the guarded tool')] },
-      runConfig(conversationId),
+      runConfig(conversationId, checkpointNamespace),
     );
 
     const interrupt = run.getInterrupt();
@@ -227,7 +240,6 @@ describe('HITL checkpoint lifecycle (full wiring)', () => {
     expect(paused.checkpoints).toBeGreaterThan(0); // the interrupt checkpoint is durable
 
     // --- Pause bookkeeping (mirrors AgentClient.handleRunInterrupt). ---
-    const job = await GenerationJobManager.createJob(conversationId, USER_ID, conversationId);
     await GenerationJobManager.updateMetadata(conversationId, {
       endpoint: 'agents',
       agent_id: 'agent-e2e',
@@ -257,7 +269,7 @@ describe('HITL checkpoint lifecycle (full wiring)', () => {
           runId: responseMessageId,
         });
         await resumed.resume(resumeValue, {
-          ...runConfig(conversationId),
+          ...runConfig(conversationId, checkpointNamespace),
           signal: (abortController ?? new AbortController()).signal,
         });
         const reInterrupt = resumed.getInterrupt?.();
