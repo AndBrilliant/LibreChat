@@ -25,6 +25,7 @@ const mockGenerationJobManager = {
   completeJob: jest.fn(),
   abortJob: jest.fn(),
   failPausePersistence: jest.fn(),
+  updateScheduleOutcome: jest.fn(async () => true),
   getResumeState: jest.fn(),
   updateMetadata: jest.fn(),
   claimGeneration: jest.fn(),
@@ -2762,6 +2763,48 @@ describe('ResumableAgentController resume metadata', () => {
     );
     expect(mockDecrementPendingRequest).toHaveBeenCalledWith('user-123');
     expect(mockDisposeClient).toHaveBeenCalledWith(client);
+  });
+
+  it('retains a scheduled generation failure with its classified outcome on the claim', async () => {
+    const generationError = new Error('provider exploded');
+    const schedules = require('~/server/services/Schedules');
+    // The Mongo outcome write fails too: the claim's stamped classification is then
+    // the ONLY thing standing between the reconciler and a re-derived `success`.
+    schedules.recordScheduleOutcome.mockResolvedValueOnce(false);
+    mockGenerationJobManager.completeJob.mockResolvedValue(true);
+    const client = {
+      options: {},
+      sendMessage: jest.fn().mockRejectedValue(generationError),
+    };
+    const initializeClient = jest.fn().mockResolvedValue({ client });
+    const req = {
+      user: { id: 'user-123' },
+      _isScheduledFire: true,
+      body: {
+        text: 'Scheduled prompt',
+        messageId: 'user-msg',
+        conversationId: 'conversation-123',
+        scheduleId: 'sched-1',
+        scheduledFor: '2026-07-28T12:00:00.000Z',
+        endpointOption: { endpoint: 'agents', modelOptions: { model: 'gpt-4.1' } },
+      },
+      config: {},
+    };
+
+    await AgentController(req, createResumableResponse(), jest.fn(), initializeClient, null);
+    await nextTick();
+
+    expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(
+      'conversation-123',
+      generationError.message,
+      1000,
+      {
+        preserveForReconcile: true,
+        scheduleOutcome: { status: 'error', error: generationError.message },
+      },
+    );
+    // The failed outcome write must NOT reap the only reconcile evidence.
+    expect(schedules.clearScheduledJob).not.toHaveBeenCalled();
   });
 
   it('claims terminal ownership before FINAL and always finishes the winning claim', async () => {

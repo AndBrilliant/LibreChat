@@ -3968,6 +3968,12 @@ export class RedisJobStore implements IJobStoreV2 {
       scheduledFor: data.scheduledFor || undefined,
       scheduleManual: data.scheduleManual || undefined,
       scheduleConfigRevision: data.scheduleConfigRevision || undefined,
+      /** The owner's intended outcome for a RETAINED terminal (serializeJob writes it
+       *  generically, but this mapper is explicit): dropping these on read meant every
+       *  Redis deployment fed the reconciler a bare `complete`, converting retained
+       *  balance refusals and swallowed failures back into `success`. */
+      scheduleOutcome: data.scheduleOutcome || undefined,
+      scheduleOutcomeError: data.scheduleOutcomeError || undefined,
       /** `markActivityLabels` persists this, so it has to be read back:
        *  without it every Redis reload leaves the flag undefined and resume
        *  skips activity-label gap reconciliation, silently dropping a label

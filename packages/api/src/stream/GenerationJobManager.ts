@@ -3413,20 +3413,60 @@ class GenerationJobManagerClass {
     streamId: string,
     error?: string,
     expectedCreatedAt?: number,
-    options?: { preserveForReconcile?: boolean },
+    options?: {
+      preserveForReconcile?: boolean;
+      scheduleOutcome?: { status: string; error?: string };
+    },
   ): Promise<boolean> {
     const claim = await this.claimTerminalJob(
       streamId,
       error ? 'error' : 'complete',
       error,
       expectedCreatedAt,
-      { preserveForReconcile: options?.preserveForReconcile },
+      {
+        preserveForReconcile: options?.preserveForReconcile,
+        scheduleOutcome: options?.scheduleOutcome,
+      },
     );
     if (!claim) {
       return false;
     }
     await this.finishTerminalJob(claim);
     return true;
+  }
+
+  /**
+   * Refresh the schedule-outcome stamp on an existing job (see
+   * SerializableJobData.scheduleOutcome). The stamp is normally written inside the
+   * terminal CAS with the outcome known at claim time — but a response-persistence
+   * failure AFTER a won `complete` claim changes the truthful outcome to `error`, and
+   * if the Mongo outcome write then also fails, the retained evidence is all a
+   * reconciler ever sees. The job store is a different failure domain than Mongo, so
+   * this refresh usually survives exactly the outage that made it necessary.
+   * Identity-fenced by the store's `updateJob`; best-effort (returns false on failure).
+   */
+  async updateScheduleOutcome(
+    streamId: string,
+    expectedCreatedAt: number | undefined,
+    outcome: { status: string; error?: string },
+  ): Promise<boolean> {
+    try {
+      await this.jobStore.updateJob(
+        streamId,
+        {
+          scheduleOutcome: outcome.status,
+          ...(outcome.error != null && { scheduleOutcomeError: outcome.error }),
+        },
+        expectedCreatedAt,
+      );
+      return true;
+    } catch (error) {
+      logger.warn(
+        `[GenerationJobManager] Failed to refresh schedule-outcome stamp for ${streamId}:`,
+        error,
+      );
+      return false;
+    }
   }
 
   /**
@@ -3440,12 +3480,22 @@ class GenerationJobManagerClass {
     actionId: string,
     error: string,
     expectedCreatedAt?: number,
+    options?: {
+      /** Retain the error terminal as reconcile evidence (see claimTerminalJob).
+       *  Scheduled fires MUST pass this: a failed-pause error job on the ordinary
+       *  short completed TTL evaporates during any outage longer than that TTL, and
+       *  the reconciler then misreads the vanished run as `interrupted`. */
+      preserveForReconcile?: boolean;
+      scheduleOutcome?: { status: string; error?: string };
+    },
   ): Promise<boolean> {
     if (actionId.length === 0) {
       return false;
     }
     const claim = await this.claimTerminalJob(streamId, 'error', error, expectedCreatedAt, {
       failedPauseActionId: actionId,
+      preserveForReconcile: options?.preserveForReconcile,
+      scheduleOutcome: options?.scheduleOutcome,
     });
     if (!claim) {
       return false;
@@ -6712,21 +6762,28 @@ class GenerationJobManagerClass {
     return this.jobStore.getActiveJobIdsByUser(userId, tenantId);
   }
 
-  /** Owner-side persistence acknowledgement (see IJobStore.registerUserFinalization). */
+  /** Owner-side persistence acknowledgement (see IJobStore.registerUserFinalization).
+   * The trio is optional on the store contract: a legacy store without marker support
+   * must FAIL registration (the caller then keeps its billed post-terminal work inside
+   * the active-set window — the synchronous-title fallback), while clear/count degrade
+   * to no-op/0 because nothing can ever have been deferred. */
   async registerUserFinalization(
     userId: string,
     streamId: string,
     tenantId?: string,
   ): Promise<void> {
+    if (this.jobStore.registerUserFinalization == null) {
+      throw new Error('Job store does not support finalization markers');
+    }
     return this.jobStore.registerUserFinalization(userId, streamId, tenantId);
   }
 
   async clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void> {
-    return this.jobStore.clearUserFinalization(userId, streamId, tenantId);
+    return this.jobStore.clearUserFinalization?.(userId, streamId, tenantId);
   }
 
   async countUserFinalizations(userId: string, tenantId?: string): Promise<number> {
-    return this.jobStore.countUserFinalizations(userId, tenantId);
+    return this.jobStore.countUserFinalizations?.(userId, tenantId) ?? 0;
   }
 
   private async finalizeOwnedJobsForShutdown(): Promise<void> {

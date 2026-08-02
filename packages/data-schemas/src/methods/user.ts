@@ -7,6 +7,7 @@ import {
 } from 'librechat-data-provider';
 import type { IUser, BalanceConfig, CreateUserRequest, UserDeleteResult } from '~/types';
 import type { CacheStore } from '~/types';
+import { createIndexesWithRetry } from '~/utils/retry';
 import { escapeRegExp } from '~/utils/string';
 import { signPayload } from '~/crypto';
 
@@ -128,6 +129,11 @@ export function createUserMethods(
   isUserDeleting: (userId: string) => Promise<boolean>;
   /** Users whose barrier is up but whose document still exists (unfinished cascades). */
   getUsersPendingDeletion: (limit: number) => Promise<IUser[]>;
+  /** Builds the User schema's declared indexes — notably the partial
+   *  (deletionSweepAt, deletionRequestedAt) index the deferred-deletion sweep scans on.
+   *  Production deployments disable Mongoose autoIndex, so schema declaration alone
+   *  builds nothing there and every sweep pass COLLSCANs the users collection. */
+  ensureUserDeletionIndexes: () => Promise<void>;
   /** Stamps deferred-deletion sweep attempts so the bounded window rotates. */
   markDeletionSweepAttempted: (userIds: string[]) => Promise<void>;
   /** Commits a deletion to automatic completion; only these are swept. */
@@ -412,6 +418,10 @@ export function createUserMethods(
    * that never finished (deferred on an unconfirmed quiesce, or crashed part-way).
    * Makes the destructive cascade a resumable work list instead of a one-shot.
    */
+  async function ensureUserDeletionIndexes(): Promise<void> {
+    await createIndexesWithRetry(mongoose.models.User);
+  }
+
   async function getUsersPendingDeletion(limit: number): Promise<IUser[]> {
     const User = mongoose.models.User;
     // Only COMMITTED deletions: the CLI raises the admission barrier too, then can
@@ -819,6 +829,7 @@ export function createUserMethods(
     markUserDeleting,
     isUserDeleting,
     getUsersPendingDeletion,
+    ensureUserDeletionIndexes,
     markDeletionSweepAttempted,
     markUserDeletionCommitted,
     addUserAbortFence,

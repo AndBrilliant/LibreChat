@@ -512,6 +512,16 @@ const settleAbortFence = async (user, streamId) => {
     await GenerationJobManager.abortJob(streamId).catch(() => undefined);
     return false;
   }
+  if (job.status === 'complete' || job.status === 'error') {
+    // The generation reached its OWN terminal — the run ended by its own means, so
+    // there is no stop left to deliver and re-signalling (aborted-only) could never
+    // clear this fence; it would sit permanent, deferring deletion forever. Any
+    // post-terminal billed work is what the owner-finalization markers above fence.
+    await db.clearUserAbortFence(user.id, streamId).catch((err) => {
+      logger.warn(`[quiesceInteractiveGenerations] Failed to clear fence ${streamId}`, err);
+    });
+    return false;
+  }
   const resignal = await GenerationJobManager.resignalAbort(streamId, job.createdAt).catch(() => ({
     delivered: false,
     published: false,
@@ -530,6 +540,17 @@ const settleAbortFence = async (user, streamId) => {
   return true;
 };
 
+/**
+ * Drains the user's in-flight interactive generations before the destructive cascade.
+ *
+ * SCOPE: this covers work enrolled in GenerationJobManager — the agents chat path and
+ * scheduled fires. The remote OpenAI-compatible and Responses controllers run on
+ * private per-request abort controllers this quiesce cannot see, so an
+ * already-admitted request there (notably Responses `store: true`) can persist
+ * conversations/messages/usage after the cascade. That gap predates this barrier
+ * (those paths were never drainable) and is tracked as a follow-up (see issue 14594):
+ * enrolling them in the job manager so deletion can fence them like everything else.
+ */
 const quiesceInteractiveGenerations = async (user) => {
   const activeJobIds = await GenerationJobManager.getActiveJobIdsForUser(user.id, user.tenantId);
   for (const streamId of activeJobIds ?? []) {
@@ -553,16 +574,20 @@ const quiesceInteractiveGenerations = async (user) => {
       logger.warn(`[quiesceInteractiveGenerations] Failed to abort active job ${streamId}`, err);
       return null;
     });
-    // A THROW is the INCONCLUSIVE case, never an acknowledgement. abortJob can raise
-    // after its terminal CAS has already landed (the content refresh, the required
-    // persistence, the publication), and a job is hidden from every later active-set
-    // scan the moment it goes terminal — so treating `null` as acknowledged cleared the
-    // one record standing between a still-generating peer and the destructive cascade,
-    // with nothing left to rediscover it. Keep the fence: this pass defers on the
+    // Clearing requires POSITIVE evidence — a won abort whose signal fields say the
+    // stop was delivered or at least left this replica. Everything else is
+    // inconclusive: a THROW can land after the terminal CAS (content refresh, required
+    // persistence, publication), and a `success: false` result carries NO signal
+    // fields at all (job already terminal — e.g. a concurrent Stop whose own publish
+    // failed — or a lost CAS), so testing `!== false` read those absent fields as
+    // acknowledgement and cleared the one record standing between a still-generating
+    // peer and the destructive cascade. Keep the fence: this pass defers on the
     // active-set check below, and `settleAbortFence` re-signals and settles it on a
-    // later pass (or in the deferred-deletion sweep).
+    // later pass (or in the deferred-deletion sweep) — including clearing it for a
+    // run that reached its own complete/error terminal, so fences never go permanent.
     const acknowledged =
-      result != null && (result.signalDelivered !== false || result.signalPublished !== false);
+      result?.success === true &&
+      (result.signalDelivered !== false || result.signalPublished !== false);
     if (acknowledged) {
       await db.clearUserAbortFence(user.id, streamId).catch((err) => {
         logger.warn(`[quiesceInteractiveGenerations] Failed to clear fence ${streamId}`, err);
@@ -768,6 +793,12 @@ const startPendingDeletionSweep = () => {
     return;
   }
   pendingDeletionSweepStarted = true;
+  // Production disables Mongoose autoIndex, so the partial
+  // (deletionSweepAt, deletionRequestedAt) index the sweep scans on is never built
+  // there by schema declaration alone — build it explicitly, best-effort.
+  db.ensureUserDeletionIndexes?.().catch((err) =>
+    logger.warn('[startPendingDeletionSweep] Failed to ensure deletion indexes', err),
+  );
   const run = () => {
     if (pendingDeletionSweepStopped) {
       return;

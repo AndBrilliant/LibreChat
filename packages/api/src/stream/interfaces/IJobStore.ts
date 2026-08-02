@@ -749,14 +749,20 @@ export interface IJobStore {
    * TTL-bounded in the store so a crash between register and clear can only fence
    * deletion for the TTL, never forever. (Unacknowledged deletion-side aborts are
    * fenced durably on the user document instead, since those must outlive any TTL.)
+   *
+   * OPTIONAL, so stores written against the pre-marker contract keep compiling and
+   * validating. The manager degrades coherently when the trio is absent: registration
+   * REPORTS FAILURE (callers then run their billed post-terminal work synchronously,
+   * inside the active-set window, so the deletion guarantee holds without markers) and
+   * the count reads 0 (nothing can be deferred, so nothing is outstanding).
    */
-  registerUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void>;
+  registerUserFinalization?(userId: string, streamId: string, tenantId?: string): Promise<void>;
 
   /** Clear a finalization registered by {@link registerUserFinalization}. */
-  clearUserFinalization(userId: string, streamId: string, tenantId?: string): Promise<void>;
+  clearUserFinalization?(userId: string, streamId: string, tenantId?: string): Promise<void>;
 
   /** Count live (unexpired) finalizations for a user. */
-  countUserFinalizations(userId: string, tenantId?: string): Promise<number>;
+  countUserFinalizations?(userId: string, tenantId?: string): Promise<number>;
 }
 
 /**

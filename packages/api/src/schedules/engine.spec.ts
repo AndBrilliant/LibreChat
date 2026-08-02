@@ -443,6 +443,29 @@ describe('reconciliation preserves the intended outcome', () => {
     expect(clearReconciledJob).toHaveBeenCalled();
   });
 
+  it('recovers a balance refusal that claimed an ERROR terminal as skipped_balance', async () => {
+    const methods = makeMethods(makeClaimedSchedule());
+    (methods.getRunsForReconciliation as jest.Mock).mockResolvedValue([unsettledRun()]);
+    await tickOnce(
+      makeDeps(methods, {
+        // A mid-continuation balance refusal finalizes through completeJob('error'),
+        // so the terminal is `error` — but the stamp still routes it to the
+        // insufficient_balance streak instead of too_many_failures.
+        getJobStatus: async () => ({
+          status: 'error',
+          scheduleId: 'sched-1',
+          scheduledFor: scheduledFor.toISOString(),
+          scheduleOutcome: 'skipped_balance',
+        }),
+        clearReconciledJob: jest.fn(async () => undefined),
+      }),
+    );
+
+    expect(methods.recordRunOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'skipped_balance' }),
+    );
+  });
+
   it('recovers a swallowed generation failure as error, with the owner’s message', async () => {
     const methods = makeMethods(makeClaimedSchedule());
     (methods.getRunsForReconciliation as jest.Mock).mockResolvedValue([unsettledRun()]);

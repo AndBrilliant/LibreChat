@@ -1251,6 +1251,19 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
                 pauseActionId,
                 pausePersistenceError?.message ?? 'Re-pause persistence failed',
                 pauseCreatedAt,
+                // RETAIN a scheduled fire's failed re-pause error: this path settles
+                // through the reconciler alone (the outer catch's pause branch records
+                // no outcome), so evidence on the short completed TTL evaporates during
+                // any longer outage and the run is misread as `interrupted`.
+                job.metadata?.scheduleId
+                  ? {
+                      preserveForReconcile: true,
+                      scheduleOutcome: {
+                        status: 'error',
+                        error: pausePersistenceError?.message ?? 'Re-pause persistence failed',
+                      },
+                    }
+                  : undefined,
               )) === true;
             if (!pausePersistenceFailureFinalized) {
               logger.warn(
@@ -1398,17 +1411,31 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
       // (Mongo down across its retries), retain the completed job so reconcile records
       // the failure instead of the run lingering to the abandonment sweep.
       let scheduleOutcomeRecorded = true;
+      let errorScheduleOutcome = null;
       if (job.metadata?.scheduleId) {
         // Same classification as the initial fire's catch: a mid-continuation
         // balance refusal is the OWNER's credits, not a schedule fault — it walks
         // the insufficient_balance streak, not too_many_failures.
         const balanceRefusal = isBalanceViolationError(err);
+        errorScheduleOutcome = balanceRefusal
+          ? { status: 'skipped_balance' }
+          : { status: 'error', error: err?.message ?? 'Resume failed' };
+        // EVIDENCE FIRST: a finalize that claimed `complete` stamped its outcome
+        // BEFORE the response save that just threw, so the retained job still says
+        // `success`. Refresh the stamp (job store — a different failure domain than
+        // Mongo) before the outcome write below, so a reconciler recovering from that
+        // write's failure reproduces the truthful classification.
+        await GenerationJobManager.updateScheduleOutcome(
+          streamId,
+          job.createdAt,
+          errorScheduleOutcome,
+        );
         scheduleOutcomeRecorded = await recordScheduleOutcome({
           scheduleId: job.metadata.scheduleId,
           scheduledFor: job.metadata.scheduledFor,
-          status: balanceRefusal ? 'skipped_balance' : 'error',
+          status: errorScheduleOutcome.status,
           conversationId: streamId,
-          ...(balanceRefusal ? {} : { error: err?.message ?? 'Resume failed' }),
+          ...(errorScheduleOutcome.error != null && { error: errorScheduleOutcome.error }),
         });
       }
       // completeJob atomically claims running -> error and parks steers before
@@ -1423,6 +1450,9 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
             job.createdAt,
             {
               preserveForReconcile: Boolean(job.metadata?.scheduleId) && !scheduleOutcomeRecorded,
+              // Ride the classification on the claim: a balance refusal claims an
+              // `error` terminal but must walk the insufficient_balance streak.
+              ...(errorScheduleOutcome != null && { scheduleOutcome: errorScheduleOutcome }),
             },
           )) === true;
       } catch (completeErr) {

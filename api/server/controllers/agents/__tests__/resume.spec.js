@@ -67,6 +67,7 @@ const mockGenerationJobManager = {
   publishTerminalClaim: jest.fn(),
   finishTerminalJob: jest.fn(),
   completeJob: jest.fn(),
+  updateScheduleOutcome: jest.fn(async () => true),
   failPausePersistence: jest.fn(),
   expireApproval: jest.fn(),
   abortJob: jest.fn(),
@@ -1712,6 +1713,8 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         NEXT_ACTION_ID,
         're-pause save failed',
         1000,
+        // Interactive turn: no scheduled evidence to retain.
+        undefined,
       );
       expect(mockGenerationJobManager.approvals.finishPausePersistence).not.toHaveBeenCalled();
       expect(mockGenerationJobManager.completeJob).not.toHaveBeenCalled();
@@ -1775,6 +1778,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
         NEXT_ACTION_ID,
         'Re-pause response progress could not be persisted',
         1000,
+        undefined,
       );
       expect(mockGenerationJobManager.approvals.finishPausePersistence).not.toHaveBeenCalled();
       expect(mockGenerationJobManager.completeJob).not.toHaveBeenCalled();
@@ -1933,6 +1937,37 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
           scheduleOutcome: { status: 'skipped_balance' },
         }),
       );
+    });
+
+    it('refreshes the retained stamp when persistence AND the outcome write both fail', async () => {
+      mockGenerationJobManager.getJob.mockResolvedValue(
+        makeToolApprovalJob({ metadata: { scheduleId: 'sched-1', scheduledFor: SCHEDULED_FOR } }),
+      );
+      // The complete-claim stamps `success` BEFORE the response save; the save then
+      // fails and the Mongo outcome write fails too. Without the refresh, the retained
+      // evidence keeps saying success and the reconciler faithfully reproduces it.
+      mockSaveMessage.mockResolvedValue(null);
+      mockRecordScheduleOutcome.mockResolvedValue(false);
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      expect(mockGenerationJobManager.updateScheduleOutcome).toHaveBeenCalledWith(
+        CONVO_ID,
+        1000,
+        expect.objectContaining({ status: 'error' }),
+      );
+      // Evidence FIRST: the job-store stamp lands before the Mongo outcome attempt.
+      expect(
+        mockGenerationJobManager.updateScheduleOutcome.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        mockRecordScheduleOutcome.mock.invocationCallOrder[
+          mockRecordScheduleOutcome.mock.invocationCallOrder.length - 1
+        ],
+      );
+      // The failed outcome write must NOT reap the only reconcile evidence.
+      expect(mockClearScheduledJob).not.toHaveBeenCalled();
     });
 
     /**

@@ -424,6 +424,56 @@ describe('deleteUserController - interactive generation quiesce', () => {
     expect(mockDeleteUserById).not.toHaveBeenCalled();
   });
 
+  it('keeps the fence when abortJob resolves unsuccessfully WITHOUT signal fields', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    const db = require('~/models');
+    GenerationJobManager.getActiveJobIdsForUser.mockResolvedValueOnce(['conv-peer']);
+    // The lost-CAS / already-terminal returns carry NO signal fields — e.g. a
+    // concurrent Stop won the abort but its own publish failed. Testing `!== false`
+    // read those absent fields as an acknowledgement and cleared the only record of
+    // an unconfirmed stop; clearing requires POSITIVE evidence.
+    GenerationJobManager.abortJob.mockResolvedValueOnce({
+      success: false,
+      jobData: null,
+      content: [],
+      finalEvent: null,
+      text: '',
+      collectedUsage: [],
+    });
+
+    await deleteUserController(req, res);
+
+    expect(db.clearUserAbortFence).not.toHaveBeenCalled();
+    expect(GenerationJobManager.resignalAbort).toHaveBeenCalledWith('conv-peer');
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockDeleteUserById).not.toHaveBeenCalled();
+  });
+
+  it('clears a fence whose run reached its own complete terminal, instead of fencing forever', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    const db = require('~/models');
+    db.getUserAbortFences.mockResolvedValueOnce(['conv-peer']);
+    // The generation ended by its own means: no stop is left to deliver, and
+    // resignalAbort (aborted-only) could never clear this fence — it would sit
+    // permanent and defer the deletion forever. Post-terminal billed work is what
+    // the owner-finalization markers fence, not this record.
+    GenerationJobManager.getJob.mockResolvedValueOnce({
+      status: 'complete',
+      createdAt: 1000,
+      metadata: { userId: 'user1' },
+    });
+
+    await deleteUserController(req, res);
+
+    expect(db.clearUserAbortFence).toHaveBeenCalledWith('user1', 'conv-peer');
+    expect(GenerationJobManager.resignalAbort).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(503);
+  });
+
   it('clears the fence immediately when the abort is acknowledged', async () => {
     const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
     const res = createRes();

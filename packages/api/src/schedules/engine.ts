@@ -39,7 +39,10 @@ function jobIdentityMatches(jobState: JobState | null, run: IScheduleRun): boole
  * serialization boundary, and `recordRunOutcome` would reject a status outside its
  * union — losing a rare refinement beats failing the recovery write outright.
  */
-function retainedOutcome(jobState: JobState | null): {
+function retainedOutcome(
+  jobState: JobState | null,
+  fallback: 'success' | 'error',
+): {
   status: 'success' | 'error' | 'skipped_balance';
   error?: string;
 } {
@@ -47,10 +50,10 @@ function retainedOutcome(jobState: JobState | null): {
   if (stamped === 'skipped_balance') {
     return { status: 'skipped_balance' };
   }
-  if (stamped === 'error') {
+  if (stamped === 'error' || fallback === 'error') {
     return { status: 'error', error: jobState?.scheduleOutcomeError ?? 'Run ended in error' };
   }
-  return { status: 'success' };
+  return { status: fallback };
 }
 
 export type ScheduleEngine = {
@@ -174,13 +177,16 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
               // error part alike, so re-deriving `success` here turned a transient
               // outcome-write failure into a reset of the very streaks that drive
               // insufficient_balance and too_many_failures auto-disable.
-              const intended = retainedOutcome(jobState);
+              const intended = retainedOutcome(jobState, 'success');
               await finalize(intended.status, intended.error);
               await clearRetainedJob();
               continue;
             }
             if (jobStatus === 'error') {
-              await finalize('error', jobState?.scheduleOutcomeError ?? 'Run ended in error');
+              // Honor the stamp here too: a mid-continuation balance refusal claims an
+              // `error` terminal but must walk the insufficient_balance streak.
+              const intended = retainedOutcome(jobState, 'error');
+              await finalize(intended.status, intended.error);
               await clearRetainedJob();
               continue;
             }

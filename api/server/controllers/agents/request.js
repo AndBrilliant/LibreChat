@@ -1789,6 +1789,20 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
                   pauseActionId,
                   pausePersistenceError?.message ?? 'Pause persistence failed',
                   pauseCreatedAt,
+                  // RETAIN a scheduled fire's failed-pause error: on the ordinary short
+                  // completed TTL this evidence evaporates during any outage longer than
+                  // the TTL, and the reconciler then misreads the vanished run as
+                  // `interrupted` instead of `error`. Reaped by the catch below once the
+                  // outcome write lands, or by the reconciler's error branch.
+                  scheduleId
+                    ? {
+                        preserveForReconcile: true,
+                        scheduleOutcome: {
+                          status: 'error',
+                          error: pausePersistenceError?.message ?? 'Pause persistence failed',
+                        },
+                      }
+                    : undefined,
                 );
               } catch (failError) {
                 logger.error(
@@ -2282,6 +2296,7 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
         }
 
         let errorScheduleOutcomeRecorded = true;
+        let errorScheduleOutcome = null;
         if (scheduleId) {
           // SETTLE LAST: flush every pending persistence write (the background
           // user-message/conversation save, a disconnect-partial save, and — for an
@@ -2300,6 +2315,23 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
             outcomeStatus = 'interrupted';
           } else if (balanceRefusal) {
             outcomeStatus = 'skipped_balance';
+          }
+          errorScheduleOutcome = {
+            status: outcomeStatus,
+            ...(outcomeStatus === 'error' && { error: error.message || 'Generation failed' }),
+          };
+          // EVIDENCE FIRST: a won complete-claim stamped its outcome BEFORE the
+          // persistence that just failed, so the retained job still says `success`.
+          // Refresh the stamp before the Mongo outcome write — the job store is a
+          // different failure domain, so this usually survives exactly the outage
+          // that fails the write below, and the reconciler then reproduces the
+          // truthful classification instead of re-deriving success.
+          if (terminalClaim && !wasAborted) {
+            await GenerationJobManager.updateScheduleOutcome(
+              streamId,
+              jobCreatedAt,
+              errorScheduleOutcome,
+            );
           }
           errorScheduleOutcomeRecorded = cleared
             ? await recordScheduleOutcome({
@@ -2362,6 +2394,10 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
             // unreconcilable.
             await GenerationJobManager.completeJob(streamId, generationError, jobCreatedAt, {
               preserveForReconcile: Boolean(scheduleId) && !errorScheduleOutcomeRecorded,
+              // Ride the classification on the claim itself so the retained evidence
+              // can never disagree with it (a balance refusal claims an `error`
+              // terminal but must walk the insufficient_balance streak).
+              ...(errorScheduleOutcome != null && { scheduleOutcome: errorScheduleOutcome }),
             });
           } catch (completeErr) {
             logger.warn(

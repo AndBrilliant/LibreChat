@@ -873,6 +873,31 @@ describe('RedisJobStore', () => {
     await expect(store.getJob('conv-manual')).resolves.toMatchObject({ scheduleManual: '1' });
   });
 
+  test('round-trips the retained schedule outcome', async () => {
+    const redis = {
+      isCluster: false,
+      hgetall: jest.fn().mockResolvedValue({
+        streamId: 'conv-retained',
+        userId: 'user-1',
+        status: 'complete',
+        createdAt: '1000',
+        scheduleId: 'sched-1',
+        scheduledFor: '2026-07-26T12:00:00.000Z',
+        scheduleOutcome: 'skipped_balance',
+        scheduleOutcomeError: 'upstream 503',
+      }),
+    } as unknown as Cluster;
+    const store = new RedisJobStore(redis);
+
+    // Dropping these on read fed the reconciler a bare `complete`, converting every
+    // retained balance refusal / swallowed failure back into `success` under Redis —
+    // the exact misclassification the stamp exists to prevent.
+    await expect(store.getJob('conv-retained')).resolves.toMatchObject({
+      scheduleOutcome: 'skipped_balance',
+      scheduleOutcomeError: 'upstream 503',
+    });
+  });
+
   test('writes schedule identity into the created job hash', async () => {
     const evalCreate = jest
       .fn()
