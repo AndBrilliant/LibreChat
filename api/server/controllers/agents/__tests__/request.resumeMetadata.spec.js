@@ -1746,6 +1746,39 @@ describe('ResumableAgentController resume metadata', () => {
     expect(mockGenerationJobManager.createJob).not.toHaveBeenCalled();
   });
 
+  it('re-applies the live dispatch policy at the last gate before a billed generation', async () => {
+    // The claim -> loopback POST window is short but real, and an operator kill switch, a
+    // narrowed `interface.schedules`, or a revoked SCHEDULES:USE touches neither the row
+    // nor its configRevision — so without `policy`, this gate could only catch a delete
+    // or an edit, and an occurrence already in flight still ran one full billed turn.
+    // Both resume gates already ask for it; this one is the fire path's equivalent.
+    const schedules = require('~/server/services/Schedules');
+    mockGenerationJobManager.claimGeneration.mockResolvedValue(wonGenerationClaim());
+    const req = {
+      user: { id: 'user-123' },
+      _isScheduledFire: true,
+      body: {
+        text: 'Scheduled prompt',
+        messageId: 'user-msg',
+        clientRequestId: 'req-policy',
+        conversationId: 'conversation-123',
+        scheduleId: 'sched-1',
+        scheduledFor: '2026-07-28T12:00:00.000Z',
+        scheduleConfigRevision: 3,
+        endpointOption: { endpoint: 'agents', modelOptions: { model: 'gpt-4.1' } },
+      },
+      config: {},
+    };
+
+    await AgentController(req, createResumableResponse(), jest.fn(), jest.fn(), null);
+
+    expect(schedules.isScheduleLive).toHaveBeenCalledWith(
+      'sched-1',
+      3,
+      expect.objectContaining({ automatic: true, policy: true }),
+    );
+  });
+
   it('releases the pending slot and idempotency claim when the pre-start fence aborts', async () => {
     // Manual Run Now is NOT limiter-exempt, so the controller incremented the pending
     // counter and claimed the clientRequestId. The fence abort skips the whole

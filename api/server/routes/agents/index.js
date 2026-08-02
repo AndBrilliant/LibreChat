@@ -1073,6 +1073,13 @@ router.post('/chat/abort', configMiddleware, async (req, res, next) => {
         abortResultResponseMessageId: abortResult.jobData?.responseMessageId,
       });
 
+      // The status the abort's terminal CAS actually won FROM. `jobData.status` is the
+      // PRE-race read: a paused run that resumed on another replica before the CAS is
+      // aborted from `running`, and both decisions below ("was there a generation loop
+      // to deliver to?" and "is this route the run's only settler?") are wrong if they
+      // trust the stale read. Falls back for a store that predates the field.
+      const abortedFromStatus = abortResult.abortedFromStatus ?? abortResult.jobData?.status;
+
       // A won CAS whose cross-replica publication provably FAILED (threw/timed out)
       // means the stop never left this replica: the peer-owned generation keeps
       // running and billing. Re-signal once; if that also fails, the response stays
@@ -1086,7 +1093,7 @@ router.post('/chat/abort', configMiddleware, async (req, res, next) => {
       if (
         abortResult.signalDelivered === false &&
         abortResult.signalPublished === false &&
-        abortResult.jobData?.status !== 'requires_action'
+        abortedFromStatus !== 'requires_action'
       ) {
         const resignal = await GenerationJobManager.resignalAbort(jobStreamId, job.createdAt).catch(
           () => ({ delivered: false, published: false }),
@@ -1131,7 +1138,7 @@ router.post('/chat/abort', configMiddleware, async (req, res, next) => {
       // Only after WINNING the abort: losing the CAS means a concurrent completion or
       // resume owns the run, and terminalizing it as `interrupted` would release its slot
       // and reduce the real outcome's write to a no-op against an already-terminal row.
-      if (scheduleId && abortResult.success && abortResult.jobData?.status === 'requires_action') {
+      if (scheduleId && abortResult.success && abortedFromStatus === 'requires_action') {
         const recorded = await recordScheduleOutcome({
           scheduleId,
           scheduledFor: job.metadata.scheduledFor,

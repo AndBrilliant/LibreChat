@@ -41,7 +41,10 @@ const {
   clearScheduledJob,
   awaitStopAbortPersistence,
 } = require('~/server/services/Schedules');
-const { isBalanceViolationError } = require('~/server/controllers/agents/errors');
+const {
+  isBalanceViolationError,
+  classifyScheduleOutcome,
+} = require('~/server/controllers/agents/errors');
 const { saveMessage, getMessages, getConvo } = require('~/models');
 const {
   GENERATION_PROTOCOL_HEADER,
@@ -991,6 +994,13 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
       if (
         !(await isScheduleLive(scheduleId, scheduleConfigRevision, {
           automatic: req._isManualScheduledFire !== true,
+          // Re-apply the LIVE dispatch policy, exactly as both resume gates do. This is
+          // the LAST gate before a billed generation starts, and an operator kill switch,
+          // a narrowed `interface.schedules`, or a revoked SCHEDULES:USE landing after
+          // preflight touches neither the row nor its revision — so without this, an
+          // occurrence already in the claim-to-controller window still ran one full
+          // billed turn for a schedule the operator believes is stopped.
+          policy: true,
         }))
       ) {
         logger.info(
@@ -1460,8 +1470,23 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
           // claim is frozen, so a scheduled fire must be claimed RETAINED (terminal
           // WITHOUT `completedAt`): that record is the only evidence a reconciler could
           // read if the outcome write never lands. The settlement below reaps it via
-          // `clearScheduledJob` as soon as the outcome IS durable.
-          ...(scheduleId ? { preserveForReconcile: true } : {}),
+          // `clearScheduledJob` as soon as the outcome IS durable. The intended outcome
+          // rides along for the non-aborted case, because `complete` alone cannot tell
+          // the reconciler a swallowed provider failure (or a mid-run balance refusal)
+          // from a clean finish — see classifyScheduleOutcome.
+          ...(scheduleId
+            ? {
+                preserveForReconcile: true,
+                ...(terminalWasAborted
+                  ? {}
+                  : {
+                      scheduleOutcome: classifyScheduleOutcome(
+                        client?.completionError,
+                        'Run ended in error',
+                      ),
+                    }),
+              }
+            : {}),
         },
       );
       return terminalClaim != null;
@@ -2139,10 +2164,14 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
               });
             }
             await awaitPendingPersistence();
+            // Classified, never a bare `success`: sendCompletion swallows a provider,
+            // tool, or model failure into an ERROR content part instead of throwing (so
+            // the interactive UX can show it), which means this branch is also reached by
+            // runs that produced nothing but an error. See classifyScheduleOutcome.
             scheduleOutcomeRecorded = await recordScheduleOutcome({
               scheduleId,
               scheduledFor,
-              status: 'success',
+              ...classifyScheduleOutcome(client?.completionError, 'Run ended in error'),
               conversationId: conversation?.conversationId,
             });
           } else {

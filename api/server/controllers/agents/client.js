@@ -2693,6 +2693,12 @@ class AgentClient extends BaseClient {
           '[api/server/controllers/agents/client.js #sendCompletion] Unhandled error type',
           err,
         );
+        // Surfaced to the controller WITHOUT rethrowing, same contract as
+        // `resumeError` below: the interactive UX finalizes with the error as content,
+        // but a scheduled fire's bookkeeping must still classify it — recorded as
+        // `success`, a run that dies on the provider call every time resets the
+        // consecutive-failure streak and never reaches `autoDisableAfterFailures`.
+        this.completionError = err;
         const videoError = resolveGoogleVideoError({
           error: err,
           provider: this.options.agent?.provider,

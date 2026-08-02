@@ -398,3 +398,98 @@ describe('reconciliation abort fence', () => {
     );
   });
 });
+
+describe('reconciliation preserves the intended outcome', () => {
+  const scheduledFor = new Date(0);
+  /** A run whose inline outcome write never landed: old enough to reconcile, still
+   *  `started`, with the owner's retained terminal job as the only evidence. */
+  const unsettledRun = () => ({
+    scheduleId: 'sched-1',
+    scheduledFor,
+    user: 'u1',
+    status: 'started',
+    conversationId: 'c1',
+    firedAt: new Date(Date.now() - 60 * 60_000),
+  });
+  const retainedComplete =
+    (extra: Record<string, string> = {}) =>
+    async () => ({
+      status: 'complete',
+      scheduleId: 'sched-1',
+      scheduledFor: scheduledFor.toISOString(),
+      ...extra,
+    });
+
+  /**
+   * A terminal `complete` is generic: it covers a clean finish, a mid-run balance
+   * refusal, and a provider failure the client swallowed into an error part. Deriving
+   * `success` from it turned a transient outcome-write failure into a reset of the very
+   * streaks that drive insufficient_balance and too_many_failures auto-disable.
+   */
+  it('recovers a balance refusal as skipped_balance, not success', async () => {
+    const methods = makeMethods(makeClaimedSchedule());
+    (methods.getRunsForReconciliation as jest.Mock).mockResolvedValue([unsettledRun()]);
+    const clearReconciledJob = jest.fn(async () => undefined);
+    await tickOnce(
+      makeDeps(methods, {
+        getJobStatus: retainedComplete({ scheduleOutcome: 'skipped_balance' }),
+        clearReconciledJob,
+      }),
+    );
+
+    expect(methods.recordRunOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ scheduleId: 'sched-1', status: 'skipped_balance' }),
+    );
+    expect(clearReconciledJob).toHaveBeenCalled();
+  });
+
+  it('recovers a swallowed generation failure as error, with the owner’s message', async () => {
+    const methods = makeMethods(makeClaimedSchedule());
+    (methods.getRunsForReconciliation as jest.Mock).mockResolvedValue([unsettledRun()]);
+    await tickOnce(
+      makeDeps(methods, {
+        getJobStatus: retainedComplete({
+          scheduleOutcome: 'error',
+          scheduleOutcomeError: 'upstream 503',
+        }),
+        clearReconciledJob: jest.fn(async () => undefined),
+      }),
+    );
+
+    expect(methods.recordRunOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'error', error: 'upstream 503' }),
+    );
+  });
+
+  it('still records success when the owner left no stamp', async () => {
+    const methods = makeMethods(makeClaimedSchedule());
+    (methods.getRunsForReconciliation as jest.Mock).mockResolvedValue([unsettledRun()]);
+    await tickOnce(
+      makeDeps(methods, {
+        getJobStatus: retainedComplete(),
+        clearReconciledJob: jest.fn(async () => undefined),
+      }),
+    );
+
+    expect(methods.recordRunOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'success' }),
+    );
+  });
+
+  // The stamp crosses a serialization boundary, and recordRunOutcome would reject a
+  // status outside its union: degrade to success rather than fail the recovery write.
+  it('degrades an unrecognized stamp to success', async () => {
+    const methods = makeMethods(makeClaimedSchedule());
+    (methods.getRunsForReconciliation as jest.Mock).mockResolvedValue([unsettledRun()]);
+    await tickOnce(
+      makeDeps(methods, {
+        getJobStatus: retainedComplete({ scheduleOutcome: 'not_a_status' }),
+        clearReconciledJob: jest.fn(async () => undefined),
+      }),
+    );
+
+    expect(methods.recordRunOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'success' }),
+    );
+  });
+});

@@ -473,6 +473,10 @@ export function createSchedulesService(
         scheduleId: job.scheduleId,
         scheduledFor: job.scheduledFor,
         createdEventEmitted: job.createdEventEmitted === true,
+        ...(job.scheduleOutcome != null && { scheduleOutcome: job.scheduleOutcome }),
+        ...(job.scheduleOutcomeError != null && {
+          scheduleOutcomeError: job.scheduleOutcomeError,
+        }),
       };
     },
     abortScheduledJob: async (conversationId, identity, options) => {

@@ -20,7 +20,10 @@ const {
   isSteerPreemptSupported,
   toPendingSteer,
 } = require('@librechat/api');
-const { isBalanceViolationError } = require('~/server/controllers/agents/errors');
+const {
+  isBalanceViolationError,
+  classifyScheduleOutcome,
+} = require('~/server/controllers/agents/errors');
 const { disposeClient } = require('~/server/cleanup');
 const {
   getMCPRequestContext,
@@ -249,12 +252,16 @@ async function persistRePauseProgress({ req, client, job, streamId, conversation
  * The schedule outcome for a resumed turn that reached finalize. resumeCompletion
  * deliberately swallows continuation errors into an ERROR content part (the
  * interactive UX finalizes with the error visible), surfacing them on
- * `client.resumeError` — so a mid-continuation balance refusal must be classified
- * HERE, not in the catch below, or the schedule records `success` and the
- * insufficient_balance policy never walks.
+ * `client.resumeError` — so a mid-continuation failure must be classified HERE, not in
+ * the catch below, which never runs for it. A balance refusal walks the
+ * insufficient_balance policy; every OTHER swallowed error is a genuine failure, and
+ * recording it as `success` reset the consecutive-failure streak, so a schedule whose
+ * every run dies on the provider call never reached `autoDisableAfterFailures` and
+ * retried forever. Aborts never land here — the client only records the error on its
+ * non-aborted branch.
  */
 function resumedOutcomeStatus(client) {
-  return isBalanceViolationError(client?.resumeError) ? 'skipped_balance' : 'success';
+  return classifyScheduleOutcome(client?.resumeError, 'Resumed run ended in error');
 }
 
 /** Untenanted jobs (pre-multi-tenancy) remain accessible if the userId check passes. */
@@ -460,24 +467,37 @@ async function finalizeResumedTurn({
       // claim is frozen, so a scheduled fire must be claimed RETAINED (terminal WITHOUT
       // `completedAt`): that record is the only evidence a reconciler could read if the
       // outcome write never lands. The settlement below reaps it via `clearScheduledJob`
-      // as soon as the outcome IS durable.
-      ...(meta.scheduleId ? { preserveForReconcile: true } : {}),
+      // as soon as the outcome IS durable. The intended outcome rides along, because
+      // `complete` alone cannot tell the reconciler a balance refusal (or a swallowed
+      // provider failure) from a clean finish.
+      ...(meta.scheduleId
+        ? { preserveForReconcile: true, scheduleOutcome: resumedOutcomeStatus(client) }
+        : {}),
     },
   );
   if (!terminalClaim) {
     logger.warn(
       `[ResumeAgentController] Skipping resumed FINAL — another terminal/pause transition won for ${streamId}`,
     );
-    // Settle the run even though the terminal job writes are skipped: the response was
-    // already persisted above, so this occurrence produced its output, and leaving the
-    // row `started` would hold a capacity slot and block deletion until the sweep.
+    // Do NOT record success here. The response save is BELOW this claim (the terminal
+    // CAS deliberately precedes the outcome-defining write), so a lost claim means this
+    // occurrence persisted nothing — and recording it as produced output would also skip
+    // the winner's persistence barrier, releasing the run's capacity slot while Stop was
+    // still writing. Settlement belongs to whoever won: a pause writes
+    // `requires_action`, any other terminal winner writes its own outcome, and an abort
+    // leaves THIS controller the settler for a resumed (running-at-CAS) run — which
+    // `settleAbortedScheduledResume` does behind the barrier, failing closed.
     if (meta.scheduleId) {
-      await recordScheduleOutcome({
-        scheduleId: meta.scheduleId,
-        scheduledFor: meta.scheduledFor,
-        status: resumedOutcomeStatus(client),
-        conversationId,
+      const winner = await GenerationJobManager.getJob(streamId).catch((err) => {
+        logger.warn(
+          `[ResumeAgentController] Could not identify the terminal winner for ${streamId}`,
+          err,
+        );
+        return null;
       });
+      if (winner?.createdAt === job.createdAt && winner.status === 'aborted') {
+        await settleAbortedScheduledResume(job, streamId, conversationId);
+      }
     }
     return;
   }
@@ -602,7 +622,7 @@ async function finalizeResumedTurn({
     const scheduleOutcomeRecorded = await recordScheduleOutcome({
       scheduleId: meta.scheduleId,
       scheduledFor: meta.scheduledFor,
-      status: resumedOutcomeStatus(client),
+      ...resumedOutcomeStatus(client),
       conversationId,
     });
     // Only reap the retained job once the outcome is durable: reconcile never rescans a

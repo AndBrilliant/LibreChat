@@ -1882,6 +1882,101 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       );
     });
 
+    it('classifies any other swallowed continuation failure as error', async () => {
+      mockGenerationJobManager.getJob.mockResolvedValue(
+        makeToolApprovalJob({ metadata: { scheduleId: 'sched-1', scheduledFor: SCHEDULED_FOR } }),
+      );
+      mockRecordScheduleOutcome.mockResolvedValue(true);
+      const client = makeClient();
+      client.resumeCompletion = jest.fn().mockImplementation(async () => {
+        client.resumeError = new Error('upstream 503');
+      });
+      mockInitializeClient.mockResolvedValue({ client, userMCPAuthMap: {} });
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      // Recorded as success, this reset the consecutive-failure streak every run, so a
+      // schedule that always dies on the provider call never hit autoDisableAfterFailures.
+      expect(mockRecordScheduleOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'error', error: 'upstream 503' }),
+      );
+      expect(mockRecordScheduleOutcome).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'success' }),
+      );
+    });
+
+    it('stamps the intended outcome on the retained claim so recovery can reproduce it', async () => {
+      mockGenerationJobManager.getJob.mockResolvedValue(
+        makeToolApprovalJob({ metadata: { scheduleId: 'sched-1', scheduledFor: SCHEDULED_FOR } }),
+      );
+      const client = makeClient();
+      client.resumeCompletion = jest.fn().mockImplementation(async () => {
+        client.resumeError = new Error(JSON.stringify({ type: 'token_balance' }));
+      });
+      mockInitializeClient.mockResolvedValue({ client, userMCPAuthMap: {} });
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      // A terminal `complete` cannot tell a balance refusal from a clean finish, so the
+      // reconciler would re-derive `success` if the inline outcome write failed.
+      expect(mockGenerationJobManager.claimTerminalJob).toHaveBeenCalledWith(
+        CONVO_ID,
+        'complete',
+        undefined,
+        1000,
+        expect.objectContaining({
+          preserveForReconcile: true,
+          scheduleOutcome: { status: 'skipped_balance' },
+        }),
+      );
+    });
+
+    /**
+     * The terminal CAS precedes the response save, so losing it means this occurrence
+     * persisted NOTHING. Recording success there reported output that does not exist,
+     * and did it without the winner's persistence barrier — releasing the run's slot
+     * while Stop was still writing.
+     */
+    it('never records success for a scheduled resume that lost the terminal claim', async () => {
+      mockGenerationJobManager.getJob.mockResolvedValue(
+        makeToolApprovalJob({ metadata: { scheduleId: 'sched-1', scheduledFor: SCHEDULED_FOR } }),
+      );
+      mockGenerationJobManager.claimTerminalJob.mockResolvedValue(null);
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      expect(mockSaveMessage).not.toHaveBeenCalled();
+      expect(mockRecordScheduleOutcome).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'success' }),
+      );
+    });
+
+    it('settles a lost claim as interrupted when the abort won, behind the stop barrier', async () => {
+      const paused = makeToolApprovalJob({
+        metadata: { scheduleId: 'sched-1', scheduledFor: SCHEDULED_FOR },
+      });
+      mockGenerationJobManager.getJob
+        .mockResolvedValueOnce(paused)
+        // The post-claim read identifying the winner: a Stop took the same generation.
+        .mockResolvedValue({ ...paused, status: 'aborted' });
+      mockGenerationJobManager.claimTerminalJob.mockResolvedValue(null);
+      mockRecordScheduleOutcome.mockResolvedValue(true);
+
+      await post(approveBody());
+      await settled;
+      await flush();
+
+      expect(mockRecordScheduleOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({ scheduleId: 'sched-1', status: 'interrupted' }),
+      );
+    });
+
     it('resume failure delegates single-winner error publication and prunes the checkpoint', async () => {
       mockGenerationJobManager.getJob.mockResolvedValue(makeToolApprovalJob());
       mockInitializeClient.mockResolvedValue({

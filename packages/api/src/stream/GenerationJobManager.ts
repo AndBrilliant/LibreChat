@@ -3015,6 +3015,11 @@ class GenerationJobManagerClass {
       persistencePending?: boolean;
       failedPauseActionId?: string;
       preserveForReconcile?: boolean;
+      /** The schedule outcome this owner intends to record, stamped on the retained
+       *  job so a reconciler recovering from a failed outcome write reproduces the
+       *  owner's classification instead of re-deriving `success` from a generic
+       *  `complete`. See SerializableJobData.scheduleOutcome. */
+      scheduleOutcome?: { status: string; error?: string };
     } = {},
   ): Promise<TerminalJobClaim | null> {
     if (
@@ -3089,6 +3094,14 @@ class GenerationJobManagerClass {
         // cross-store retention signal the schedules reconciler depends on.
         ...(options.preserveForReconcile === true ? {} : { completedAt }),
         ...(terminalError != null && { error: terminalError }),
+        // Written in the SAME transaction as the terminal CAS, so retained evidence and
+        // the owner's intended classification can never disagree.
+        ...(options.scheduleOutcome != null && {
+          scheduleOutcome: options.scheduleOutcome.status,
+          ...(options.scheduleOutcome.error != null && {
+            scheduleOutcomeError: options.scheduleOutcome.error,
+          }),
+        }),
         ...(options.persistencePending === true && {
           terminalPersistencePending: true,
           terminalPersistenceStartedAt: completedAt,
@@ -3484,20 +3497,36 @@ class GenerationJobManagerClass {
     // `published` reports whether the republication left this replica (see
     // AbortResult.signalPublished); callers must stay retryable when it did not,
     // instead of discarding a swallowed failure and answering success.
+    const delivered = this.ownedJobs.get(streamId) === jobData.createdAt;
     let published = true;
     if (this.eventTransport.emitAbort) {
       try {
-        await withTimeout(
-          Promise.resolve(this.eventTransport.emitAbort(streamId, jobData.createdAt)),
-          ABORT_PUBLISH_TIMEOUT_MS,
-          `Abort republication timed out for ${streamId}`,
-        );
+        if (!delivered && this.eventTransport.emitAbortConfirmed != null) {
+          // ESCALATE exactly as abortJob does. Awaiting the plain `emitAbort` cannot
+          // detect a failure: the signature is void and the Redis implementation
+          // fire-and-forgets its publish behind an internal catch, so the await always
+          // resolves and `published` was unconditionally true — during an outage this
+          // retry path answered "republished" and the deletion quiesce cleared its
+          // durable fence while the peer generation kept running. The acknowledged
+          // variant returns the owner's correlated ack (or its durable proof).
+          published = await withTimeout(
+            this.eventTransport.emitAbortConfirmed(streamId, jobData.createdAt),
+            ABORT_PUBLISH_TIMEOUT_MS,
+            `Abort re-acknowledgement timed out for ${streamId}`,
+          );
+        } else {
+          await withTimeout(
+            Promise.resolve(this.eventTransport.emitAbort(streamId, jobData.createdAt)),
+            ABORT_PUBLISH_TIMEOUT_MS,
+            `Abort republication timed out for ${streamId}`,
+          );
+        }
       } catch (err) {
         published = false;
         logger.error(`[GenerationJobManager] Failed to republish abort for ${streamId}:`, err);
       }
     }
-    return { delivered: this.ownedJobs.get(streamId) === jobData.createdAt, published };
+    return { delivered, published };
   }
 
   async abortJob(
@@ -3736,8 +3765,13 @@ class GenerationJobManagerClass {
     });
     this.terminalClaimRuntimes.set(terminalClaim, runtime ?? null);
 
+    // `transitionFrom`, NOT the pre-race `abortableStatus`: the retry loop above
+    // re-reads and re-aims the CAS when an approval decision moves the same generation,
+    // so a job observed `requires_action` can be aborted FROM `running`. Treating that
+    // as a paused job made delivery vacuously true for a live generation this replica
+    // does not own — reporting a stop no generating process ever received.
     const abortSignalDelivered =
-      abortableStatus === 'requires_action' || this.ownedJobs.get(streamId) === jobData.createdAt;
+      transitionFrom === 'requires_action' || this.ownedJobs.get(streamId) === jobData.createdAt;
     let abortSignalPublished = true;
 
     try {
@@ -3884,6 +3918,9 @@ class GenerationJobManagerClass {
         signalDelivered: abortSignalDelivered,
         signalPublished: abortSignalPublished,
         jobData,
+        // The status the CAS won from, which the retry loop may have re-aimed away
+        // from `jobData.status`; see AbortResult.abortedFromStatus.
+        abortedFromStatus: transitionFrom,
         content: abortContent,
         finalEvent: abortFinalEvent,
         text,

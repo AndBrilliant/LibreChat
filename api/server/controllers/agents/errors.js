@@ -19,4 +19,23 @@ function isBalanceViolationError(error) {
   }
 }
 
-module.exports = { isBalanceViolationError };
+/**
+ * Maps an error the client SWALLOWED into an error content part (`completionError` on a
+ * fresh run, `resumeError` on a continuation) to the schedule outcome that fire must
+ * settle as. Both paths deliberately finalize instead of throwing so the interactive UX
+ * shows the error in the message — which left the scheduled bookkeeping recording
+ * `success` for a run that produced nothing but an error, resetting the
+ * consecutive-failure streak so `autoDisableAfterFailures` never tripped and the
+ * schedule retried on its cadence forever.
+ */
+function classifyScheduleOutcome(error, fallbackMessage) {
+  if (error == null) {
+    return { status: 'success' };
+  }
+  if (isBalanceViolationError(error)) {
+    return { status: 'skipped_balance' };
+  }
+  return { status: 'error', error: error.message ?? fallbackMessage };
+}
+
+module.exports = { isBalanceViolationError, classifyScheduleOutcome };

@@ -85,6 +85,16 @@ export interface SerializableJobData {
    *  the same revision fence the fire boundary did. Serialized as a string like every
    *  other Redis hash field. */
   scheduleConfigRevision?: string;
+  /** The schedule outcome the generation owner INTENDED to record, stamped onto a
+   *  RETAINED terminal job (`preserveForReconcile`) in the same transaction that wins
+   *  the terminal CAS. A terminal job status is generic — `complete` covers a clean
+   *  finish, a mid-run balance refusal, and a swallowed provider failure alike — so
+   *  without this the reconciler could only re-derive `success` for all three and a
+   *  transient outcome-write failure silently reset the balance/failure streaks that
+   *  drive auto-disable. Serialized as a string for the Redis hash. */
+  scheduleOutcome?: string;
+  /** Owner-intended failure message paired with `scheduleOutcome`. */
+  scheduleOutcomeError?: string;
 
   /**
    * Whether this run has activity labels enabled (per-endpoint
@@ -597,6 +607,15 @@ export interface AbortResult {
   persistenceFailed?: boolean;
   /** The job data at time of abort */
   jobData: SerializableJobData | null;
+  /** The status the terminal CAS actually transitioned FROM, which is not always
+   *  `jobData.status`: an approval decision can move the same generation between
+   *  `running` and `requires_action` after the pre-abort read, and the abort retries
+   *  from the observed status. Consumers that key on "was it paused?" — vacuous
+   *  signal delivery (a pause has no generation loop), and the Stop route's
+   *  route-side settlement (only a paused run has no owner left to settle it) — must
+   *  read THIS, or a run resumed on a peer replica gets reported delivered and
+   *  settled while its new owner is still persisting. */
+  abortedFromStatus?: SerializableJobData['status'];
   /** Aggregated content from the stream */
   content: Agents.MessageContentComplex[];
   /** Final event to send to client */

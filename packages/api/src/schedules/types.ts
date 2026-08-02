@@ -207,6 +207,12 @@ export interface JobState {
   /** Whether the generation ever emitted its created event — false means a
    *  pre-start abort whose conversation never came to exist. */
   createdEventEmitted?: boolean;
+  /** The outcome the generation owner intended to record, stamped on a retained
+   *  terminal job. A generic `complete` cannot distinguish a clean run from a balance
+   *  refusal or a swallowed provider failure, so reconciliation prefers this when the
+   *  owner left it. See SerializableJobData.scheduleOutcome. */
+  scheduleOutcome?: string;
+  scheduleOutcomeError?: string;
 }
 
 export interface FireResult {

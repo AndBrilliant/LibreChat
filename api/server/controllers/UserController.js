@@ -553,8 +553,16 @@ const quiesceInteractiveGenerations = async (user) => {
       logger.warn(`[quiesceInteractiveGenerations] Failed to abort active job ${streamId}`, err);
       return null;
     });
+    // A THROW is the INCONCLUSIVE case, never an acknowledgement. abortJob can raise
+    // after its terminal CAS has already landed (the content refresh, the required
+    // persistence, the publication), and a job is hidden from every later active-set
+    // scan the moment it goes terminal — so treating `null` as acknowledged cleared the
+    // one record standing between a still-generating peer and the destructive cascade,
+    // with nothing left to rediscover it. Keep the fence: this pass defers on the
+    // active-set check below, and `settleAbortFence` re-signals and settles it on a
+    // later pass (or in the deferred-deletion sweep).
     const acknowledged =
-      result == null || result.signalDelivered !== false || result.signalPublished !== false;
+      result != null && (result.signalDelivered !== false || result.signalPublished !== false);
     if (acknowledged) {
       await db.clearUserAbortFence(user.id, streamId).catch((err) => {
         logger.warn(`[quiesceInteractiveGenerations] Failed to clear fence ${streamId}`, err);

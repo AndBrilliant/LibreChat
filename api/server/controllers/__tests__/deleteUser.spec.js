@@ -385,6 +385,28 @@ describe('deleteUserController - interactive generation quiesce', () => {
     expect(mockDeleteUserById).not.toHaveBeenCalled();
   });
 
+  it('keeps the fence when the abort THROWS, instead of reading it as acknowledged', async () => {
+    const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
+    const res = createRes();
+    mockGetUserById.mockResolvedValue({ _id: 'user1', twoFactorEnabled: false });
+    GenerationJobManager.getActiveJobIdsForUser.mockResolvedValueOnce(['conv-peer']);
+    // abortJob can raise AFTER its terminal CAS landed (content refresh, required
+    // persistence, publication). The job is then invisible to every later active-set
+    // scan, so treating the throw as an acknowledgement cleared the only record of an
+    // unconfirmed stop and let the cascade run against a live peer generation.
+    GenerationJobManager.abortJob.mockRejectedValueOnce(new Error('publish exploded'));
+
+    await deleteUserController(req, res);
+
+    const db = require('~/models');
+    expect(db.addUserAbortFence).toHaveBeenCalledWith('user1', 'conv-peer');
+    expect(db.clearUserAbortFence).not.toHaveBeenCalled();
+    // Inconclusive, so it is re-driven rather than assumed delivered.
+    expect(GenerationJobManager.resignalAbort).toHaveBeenCalledWith('conv-peer');
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockDeleteUserById).not.toHaveBeenCalled();
+  });
+
   it('refuses to abort at all when the durable fence cannot be written', async () => {
     const req = { user: { id: 'user1', _id: 'user1', email: 'a@b.com' }, body: {} };
     const res = createRes();

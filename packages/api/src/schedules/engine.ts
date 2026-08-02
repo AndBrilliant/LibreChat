@@ -32,6 +32,27 @@ function jobIdentityMatches(jobState: JobState | null, run: IScheduleRun): boole
   return jobFor === run.scheduledFor.getTime();
 }
 
+/**
+ * The outcome the generation owner intended for a RETAINED `complete` job, or `success`
+ * when it left none (a fire from before the stamp, or a store that never carried it).
+ * An unrecognized value is treated as `success` rather than forwarded: it crossed a
+ * serialization boundary, and `recordRunOutcome` would reject a status outside its
+ * union — losing a rare refinement beats failing the recovery write outright.
+ */
+function retainedOutcome(jobState: JobState | null): {
+  status: 'success' | 'error' | 'skipped_balance';
+  error?: string;
+} {
+  const stamped = jobState?.scheduleOutcome;
+  if (stamped === 'skipped_balance') {
+    return { status: 'skipped_balance' };
+  }
+  if (stamped === 'error') {
+    return { status: 'error', error: jobState?.scheduleOutcomeError ?? 'Run ended in error' };
+  }
+  return { status: 'success' };
+}
+
 export type ScheduleEngine = {
   stop: () => void;
   /** Exposed for tests and the run-now handler: one full claim/fire pass. */
@@ -90,7 +111,7 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
             // All transitions go through recordRunOutcome so the schedule's lastRun
             // (and the card's status chip) tracks the run, including the pause.
             const finalize = (
-              status: 'success' | 'interrupted' | 'error' | 'requires_action',
+              status: 'success' | 'interrupted' | 'error' | 'requires_action' | 'skipped_balance',
               error?: string,
               opts?: { omitConversationId?: boolean },
             ) =>
@@ -146,14 +167,20 @@ export function startScheduleEngine(deps: ScheduleEngineDeps): ScheduleEngine {
             // without `completedAt`, so the store's finished-job sweep never reaps
             // them); `conversationId` is guaranteed here since jobStatus was fetched.
             if (jobStatus === 'complete') {
-              // Finalize either a paused OR a still-started run as success so it
-              // stops consuming capacity / blocking overlap.
-              await finalize('success');
+              // Finalize either a paused OR a still-started run so it stops consuming
+              // capacity / blocking overlap — but from the OWNER'S intended outcome when
+              // it left one. A terminal `complete` covers a clean finish, a mid-run
+              // balance refusal, and a provider failure the client swallowed into an
+              // error part alike, so re-deriving `success` here turned a transient
+              // outcome-write failure into a reset of the very streaks that drive
+              // insufficient_balance and too_many_failures auto-disable.
+              const intended = retainedOutcome(jobState);
+              await finalize(intended.status, intended.error);
               await clearRetainedJob();
               continue;
             }
             if (jobStatus === 'error') {
-              await finalize('error', 'Run ended in error');
+              await finalize('error', jobState?.scheduleOutcomeError ?? 'Run ended in error');
               await clearRetainedJob();
               continue;
             }
