@@ -19,17 +19,10 @@ import {
   Providers,
   EToolResources,
   EModelEndpoint,
-  getConfiguredMimeAccept,
-  bedrockDocumentMimeTypes,
   defaultAgentCapabilities,
-  bedrockDocumentExtensions,
   isDocumentSupportedProvider,
 } from 'librechat-data-provider';
-import type {
-  TConversation,
-  EndpointFileConfig,
-  MimeUploadCapability,
-} from 'librechat-data-provider';
+import type { TConversation, EndpointFileConfig } from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
 import {
   useAgentToolPermissions,
@@ -52,22 +45,6 @@ type FileUploadType =
   | 'image_document'
   | 'image_document_extended'
   | 'image_document_video_audio';
-
-/** What each provider upload path can actually send, used to scope the picker filter to selectable files. */
-const fileTypeCapabilities: Record<FileUploadType, MimeUploadCapability> = {
-  image: { categories: ['image'] },
-  document: { categories: ['document'] },
-  image_document: { categories: ['image', 'document'] },
-  image_document_extended: {
-    categories: ['image', 'document'],
-    documentMimeTypes: bedrockDocumentMimeTypes,
-  },
-  /** Google/Vertex/OpenRouter media path: documents are limited to PDF (see isProviderAttachType). */
-  image_document_video_audio: {
-    categories: ['image', 'document', 'audio', 'video'],
-    documentMimeTypes: ['application/pdf'],
-  },
-};
 
 interface AttachFileMenuProps {
   agentId?: string | null;
@@ -141,32 +118,17 @@ const AttachFileMenu = ({
         return;
       }
       inputRef.current.value = '';
-      const configuredAccept =
-        fileType !== undefined
-          ? getConfiguredMimeAccept(
-              endpointFileConfig?.supportedMimeTypes,
-              fileTypeCapabilities[fileType],
-            )
-          : undefined;
-      if (configuredAccept != null) {
-        inputRef.current.accept = configuredAccept;
-      } else if (fileType === 'image') {
-        inputRef.current.accept = 'image/*,.heif,.heic';
-      } else if (fileType === 'document') {
-        inputRef.current.accept = '.pdf,application/pdf';
-      } else if (fileType === 'image_document') {
-        inputRef.current.accept = 'image/*,.heif,.heic,.pdf,application/pdf';
-      } else if (fileType === 'image_document_extended') {
-        inputRef.current.accept = `image/*,.heif,.heic,${bedrockDocumentExtensions}`;
-      } else if (fileType === 'image_document_video_audio') {
-        inputRef.current.accept = 'image/*,.heif,.heic,.pdf,application/pdf,video/*,audio/*';
-      } else {
-        inputRef.current.accept = '';
-      }
+      /** ADR fork: every attachment gets diverted to the sandbox server-side
+       * regardless of type (see BaseClient.js processAttachments), so the
+       * provider-capability-based MIME filtering upstream LibreChat uses
+       * here no longer applies — restricting it just greys out files (e.g.
+       * .zip) that the sandbox handles fine. Accept everything, in every
+       * upload mode. */
+      inputRef.current.accept = '';
       inputRef.current.click();
       inputRef.current.accept = '';
     },
-    [endpointFileConfig?.supportedMimeTypes],
+    [],
   );
 
   const dropdownItems = useMemo(() => {
@@ -184,43 +146,29 @@ const AttachFileMenu = ({
         currentProvider = Providers.OPENROUTER;
       }
 
-      const isAzureWithResponsesApi =
-        (currentProvider === EModelEndpoint.azureOpenAI ||
-          endpointType === EModelEndpoint.azureOpenAI) &&
-        useResponsesApi === true;
-
-      if (
-        isDocumentSupportedProvider(endpointType) ||
-        isDocumentSupportedProvider(currentProvider) ||
-        isAzureWithResponsesApi
-      ) {
-        items.push({
-          label: localize('com_ui_upload_provider'),
-          onClick: () => {
-            setToolResource(undefined);
-            let fileType: Exclude<FileUploadType, 'image' | 'document'> = 'image_document';
-            if (currentProvider === Providers.GOOGLE || currentProvider === Providers.OPENROUTER) {
-              fileType = 'image_document_video_audio';
-            } else if (
-              currentProvider === Providers.BEDROCK ||
-              endpointType === EModelEndpoint.bedrock
-            ) {
-              fileType = 'image_document_extended';
-            }
-            onAction(fileType);
-          },
-          icon: <FileImageIcon className="icon-md" />,
-        });
-      } else {
-        items.push({
-          label: localize('com_ui_upload_image_input'),
-          onClick: () => {
-            setToolResource(undefined);
-            onAction('image');
-          },
-          icon: <ImageUpIcon className="icon-md" />,
-        });
-      }
+      // ADR fork: always offer "Upload to Provider" regardless of native
+      // per-provider document support — every attachment gets diverted to
+      // the sandbox server-side (BaseClient.js processAttachments) before
+      // it ever reaches the model, so the provider's real capabilities no
+      // longer gate what the UI offers. isDocumentSupportedProvider() is
+      // left untouched for its other (server-side fallback) callers.
+      items.push({
+        label: localize('com_ui_upload_provider'),
+        onClick: () => {
+          setToolResource(undefined);
+          let fileType: Exclude<FileUploadType, 'image' | 'document'> = 'image_document';
+          if (currentProvider === Providers.GOOGLE || currentProvider === Providers.OPENROUTER) {
+            fileType = 'image_document_video_audio';
+          } else if (
+            currentProvider === Providers.BEDROCK ||
+            endpointType === EModelEndpoint.bedrock
+          ) {
+            fileType = 'image_document_extended';
+          }
+          onAction(fileType);
+        },
+        icon: <FileImageIcon className="icon-md" />,
+      });
 
       if (capabilities.contextEnabled) {
         items.push({
