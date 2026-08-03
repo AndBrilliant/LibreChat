@@ -120,4 +120,76 @@ async function divertImagesToSandbox(conversationId, imageUrls, files) {
   }
 }
 
-module.exports = { divertImagesToSandbox };
+async function streamToBase64(stream) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on('data', (c) => chunks.push(c));
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('base64')));
+    stream.on('error', reject);
+  });
+}
+
+/**
+ * Diverts a set of raw attachments (documents/videos/audios — anything with
+ * real bytes in storage) into a sandbox session by re-fetching their bytes
+ * directly via the storage strategy, rather than parsing a provider-specific
+ * encoded content block. Returns a note to append to message.text in place
+ * of calling the normal encode/attach path. Fails open.
+ *
+ * @param {string} conversationId
+ * @param {Array<MongoFile>} attachments
+ * @param {(source: string) => {getDownloadStream: Function}} getStrategyFunctions
+ * @param {ServerRequest} req
+ * @param {string} kindLabel - e.g. 'document', 'video', 'audio'
+ * @returns {Promise<string|null>}
+ */
+async function divertAttachmentsToSandbox(conversationId, attachments, getStrategyFunctions, req, kindLabel) {
+  try {
+    const sessionId = await ensureSandboxSession(conversationId);
+    const notes = [];
+
+    for (const file of attachments) {
+      const source = file.source ?? 'local';
+      const { getDownloadStream } = getStrategyFunctions(source);
+      if (!getDownloadStream) continue;
+      const stream = await getDownloadStream(req, file.filepath);
+      const base64Data = await streamToBase64(stream);
+      const filename = file.filename || file.file_id || `${kindLabel}-file`;
+
+      const written = await writeFileToSandbox(sessionId, filename, base64Data);
+      notes.push(`'${filename}' -> /workspace/${written.path?.split('/').pop() ?? filename}`);
+    }
+
+    if (!notes.length) return null;
+
+    return `[${notes.length} ${kindLabel}(s) uploaded to sandbox session ${sessionId}: ${notes.join(', ')}. Use the sandbox MCP tools (sandbox_exec, sandbox_read_file) with this session_id to view or process them — the raw file content was not sent to you directly.]`;
+  } catch (e) {
+    logger.error(`[sandbox] ${kindLabel} diversion failed, falling back to normal attachment`, e);
+    return null;
+  }
+}
+
+/**
+ * Diverts pre-extracted document text (RAG/OCR output, from
+ * extractFileContext's `file.text`) into the sandbox as a .txt file, in
+ * place of inlining the full extracted text into the prompt. Fails open.
+ *
+ * @param {string} conversationId
+ * @param {string} filename
+ * @param {string} text
+ * @returns {Promise<string|null>}
+ */
+async function divertTextToSandbox(conversationId, filename, text) {
+  try {
+    const sessionId = await ensureSandboxSession(conversationId);
+    const base64Data = Buffer.from(text, 'utf-8').toString('base64');
+    const safeName = (filename || 'document').replace(/\.[^.]+$/, '') + '.txt';
+    const written = await writeFileToSandbox(sessionId, safeName, base64Data);
+    return `[Extracted text for '${filename}' (${text.length} chars) saved to sandbox session ${sessionId} at /workspace/${written.path?.split('/').pop() ?? safeName}. Use sandbox_read_file with this session_id to read it — the extracted text was not inlined into this prompt.]`;
+  } catch (e) {
+    logger.error('[sandbox] text diversion failed, falling back to inlining extracted text', e);
+    return null;
+  }
+}
+
+module.exports = { divertImagesToSandbox, divertAttachmentsToSandbox, divertTextToSandbox };

@@ -32,6 +32,10 @@ const {
   getEndpointFileConfig,
 } = require('librechat-data-provider');
 const { getStrategyFunctions } = require('~/server/services/Files/strategies');
+const {
+  divertAttachmentsToSandbox,
+  divertTextToSandbox,
+} = require('~/server/services/Files/sandbox');
 const { logViolation } = require('~/cache');
 const TextStream = require('./TextStream');
 const db = require('~/models');
@@ -1305,7 +1309,22 @@ class BaseClient {
     return await this.sendCompletion(payload, opts);
   }
 
+  /** ADR fork: divert real bytes to a sandbox session instead of sending them
+   * to the model. Falls back to normal encode/attach on any sandbox error. */
   async addDocuments(message, attachments) {
+    const sandboxNote = await divertAttachmentsToSandbox(
+      this.conversationId,
+      attachments,
+      getStrategyFunctions,
+      this.options.req,
+      'document',
+    );
+    if (sandboxNote) {
+      message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
+      message.documents = undefined;
+      return attachments;
+    }
+
     const documentResult = await encodeAndFormatDocuments(
       this.options.req,
       attachments,
@@ -1325,6 +1344,19 @@ class BaseClient {
   }
 
   async addVideos(message, attachments) {
+    const sandboxNote = await divertAttachmentsToSandbox(
+      this.conversationId,
+      attachments,
+      getStrategyFunctions,
+      this.options.req,
+      'video',
+    );
+    if (sandboxNote) {
+      message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
+      message.videos = undefined;
+      return attachments;
+    }
+
     const videoResult = await encodeAndFormatVideos(
       this.options.req,
       attachments,
@@ -1340,6 +1372,19 @@ class BaseClient {
   }
 
   async addAudios(message, attachments) {
+    const sandboxNote = await divertAttachmentsToSandbox(
+      this.conversationId,
+      attachments,
+      getStrategyFunctions,
+      this.options.req,
+      'audio',
+    );
+    if (sandboxNote) {
+      message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
+      message.audios = undefined;
+      return attachments;
+    }
+
     const audioResult = await encodeAndFormatAudios(
       this.options.req,
       attachments,
@@ -1361,7 +1406,29 @@ class BaseClient {
    * @param {MongoFile[]} attachments - Array of file attachments
    * @returns {Promise<void>}
    */
+  /** ADR fork: divert pre-extracted (RAG/OCR) text into the sandbox instead
+   * of inlining it into the prompt. This is the path that carries PDF/doc
+   * content to models without native document support (e.g. kimi, deepseek).
+   * Falls back to normal inlining on any sandbox error. */
   async addFileContextToMessage(message, attachments) {
+    const textAttachments = attachments.filter(
+      (file) => (file.source ?? FileSources.local) === FileSources.text && file.text,
+    );
+
+    if (textAttachments.length) {
+      const notes = [];
+      for (const file of textAttachments) {
+        const note = await divertTextToSandbox(this.conversationId, file.filename, file.text);
+        if (note) {
+          notes.push(note);
+        }
+      }
+      if (notes.length === textAttachments.length) {
+        message.fileContext = notes.join('\n\n');
+        return;
+      }
+    }
+
     const fileContext = await extractFileContext({
       attachments,
       req: this.options?.req,
