@@ -1441,6 +1441,31 @@ class BaseClient {
   }
 
   async processAttachments(message, attachments) {
+    /** ADR fork: universal intercept. EVERY attachment — regardless of type —
+     * gets diverted to a sandbox session instead of reaching the model, and
+     * the model gets a single generic note instead. This replaces per-type
+     * matching (image/pdf/video/audio) entirely, so file types that don't
+     * match any of those categories (e.g. zip archives, which LibreChat has
+     * no native content-block type for and which some providers reject
+     * outright — "invalid part type: file") are covered too, not just the
+     * types we happened to special-case. Falls open to the normal
+     * per-type handling below on any sandbox error. */
+    const sandboxNote = await divertAttachmentsToSandbox(
+      this.conversationId,
+      attachments,
+      getStrategyFunctions,
+      this.options.req,
+      'file',
+    );
+    if (sandboxNote) {
+      message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
+      message.image_urls = undefined;
+      message.documents = undefined;
+      message.videos = undefined;
+      message.audios = undefined;
+      return attachments;
+    }
+
     const categorizedAttachments = {
       images: [],
       videos: [],
