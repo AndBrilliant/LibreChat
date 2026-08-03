@@ -118,6 +118,7 @@ const {
 } = require('librechat-data-provider');
 const { filterFilesByAgentAccess } = require('~/server/services/Files/permissions');
 const { encodeAndFormat } = require('~/server/services/Files/images/encode');
+const { divertImagesToSandbox } = require('~/server/services/Files/sandbox');
 const { createContextHandlers } = require('~/app/clients/prompts');
 const { resolveConfigServers, getAccessibleMcpServerNames } = require('~/server/services/MCP');
 const { getMCPServerTools } = require('~/server/services/Config');
@@ -1012,6 +1013,18 @@ class AgentClient extends BaseClient {
       },
       VisionModes.agents,
     );
+    /** ADR fork: divert real image bytes into a sandbox session instead of
+     * sending them to the model. Falls back to normal attachment on any
+     * sandbox error, so this never blocks a chat turn. */
+    if (image_urls.length) {
+      const sandboxNote = await divertImagesToSandbox(this.conversationId, image_urls, files);
+      if (sandboxNote) {
+        message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
+        message.image_urls = undefined;
+        return files;
+      }
+    }
+
     message.image_urls = image_urls.length ? image_urls : undefined;
     return files;
   }
