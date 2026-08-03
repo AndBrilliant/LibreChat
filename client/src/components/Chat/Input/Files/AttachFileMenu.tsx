@@ -20,7 +20,6 @@ import {
   EToolResources,
   EModelEndpoint,
   defaultAgentCapabilities,
-  isDocumentSupportedProvider,
 } from 'librechat-data-provider';
 import type { TConversation, EndpointFileConfig } from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
