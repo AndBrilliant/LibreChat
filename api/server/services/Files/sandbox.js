@@ -66,20 +66,48 @@ async function ensureSandboxSession(conversationId) {
   return parsed.session_id;
 }
 
+// The supergateway wrapper in front of the sandbox MCP server (port 9024)
+// caps request bodies at Express's default 100KB, so anything bigger than a
+// single small write has to go through sandbox_write_file_chunk instead.
+// 60KB raw -> 80KB base64, safely under that limit with room for JSON-RPC
+// envelope overhead.
+const CHUNK_RAW_BYTES = 60 * 1024;
+
 async function writeFileToSandbox(sessionId, filename, base64Content) {
+  const buffer = Buffer.from(base64Content, 'base64');
   const init = await mcpCall('initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
     clientInfo: { name: 'librechat-sandbox-diversion', version: '1.0' },
   });
-  const writeRes = await mcpCall(
-    'tools/call',
-    { name: 'sandbox_write_file', arguments: { session_id: sessionId, filename, content_b64: base64Content } },
-    init.mcpSessionId,
-  );
-  const parsed = JSON.parse(writeRes.result.content[0].text);
-  if (!parsed.success) throw new Error(`sandbox_write_file failed: ${writeRes.result.content[0].text}`);
-  return parsed;
+
+  if (buffer.length <= CHUNK_RAW_BYTES) {
+    const writeRes = await mcpCall(
+      'tools/call',
+      { name: 'sandbox_write_file', arguments: { session_id: sessionId, filename, content_b64: base64Content } },
+      init.mcpSessionId,
+    );
+    const parsed = JSON.parse(writeRes.result.content[0].text);
+    if (!parsed.success) throw new Error(`sandbox_write_file failed: ${writeRes.result.content[0].text}`);
+    return parsed;
+  }
+
+  let last;
+  for (let offset = 0; offset < buffer.length; offset += CHUNK_RAW_BYTES) {
+    const chunk = buffer.subarray(offset, offset + CHUNK_RAW_BYTES);
+    const chunkRes = await mcpCall(
+      'tools/call',
+      {
+        name: 'sandbox_write_file_chunk',
+        arguments: { session_id: sessionId, filename, content_b64: chunk.toString('base64'), offset },
+      },
+      init.mcpSessionId,
+    );
+    const parsed = JSON.parse(chunkRes.result.content[0].text);
+    if (!parsed.success) throw new Error(`sandbox_write_file_chunk failed at offset ${offset}: ${chunkRes.result.content[0].text}`);
+    last = parsed;
+  }
+  return last;
 }
 
 /**
