@@ -1,85 +1,26 @@
 import React, { useMemo } from 'react';
-import { useRecoilValue } from 'recoil';
 import { OGDialog, OGDialogTemplate } from '@librechat/client';
-import {
-  FileSearch,
-  ImageUpIcon,
-  FileType2Icon,
-  FileImageIcon,
-  TerminalSquareIcon,
-} from 'lucide-react';
-import {
-  Constants,
-  Providers,
-  EToolResources,
-  EModelEndpoint,
-  isDocumentSupportedProvider,
-} from 'librechat-data-provider';
-import {
-  useLocalize,
-  useUploadOptions,
-  useFileUploadRouter,
-  useAgentToolPermissions,
-} from '~/hooks';
-import { useDragDropContext, useUploadModalContext } from '~/Providers';
-import { ephemeralAgentByConvoId } from '~/store';
+import { FileUp } from 'lucide-react';
+import { useLocalize, useUploadOptions, useFileUploadRouter } from '~/hooks';
+import { useUploadModalContext } from '~/Providers';
 
+/**
+ * ADR fork: getViableUploadOptions (utils/files.ts) now always resolves to a
+ * single destination, so useDragHelpers/useTextarea auto-route before this
+ * modal would ever open — it's kept only as an inert fallback (matches the
+ * `options.length === 0` error-toast branch alongside it) rather than
+ * ripped out, since the drag/paste call sites still branch on option count.
+ */
 const DragDropModal = () => {
   const localize = useLocalize();
   const { isVisible, files, closeModal } = useUploadModalContext();
-  const { conversationId, agentId, endpoint, endpointType, useResponsesApi } = useDragDropContext();
-  const ephemeralAgent = useRecoilValue(
-    ephemeralAgentByConvoId(conversationId ?? Constants.NEW_CONVO),
-  );
-  const { provider } = useAgentToolPermissions(agentId, ephemeralAgent);
   const { getOptions } = useUploadOptions();
   const routeFiles = useFileUploadRouter();
 
-  const isProviderDocSupported = useMemo(() => {
-    let currentProvider = (provider || endpoint) ?? '';
-    if (currentProvider.toLowerCase() === Providers.OPENROUTER) {
-      currentProvider = Providers.OPENROUTER;
-    }
-    const isAzureWithResponsesApi =
-      (currentProvider === EModelEndpoint.azureOpenAI ||
-        endpointType === EModelEndpoint.azureOpenAI) &&
-      useResponsesApi === true;
-    return (
-      isDocumentSupportedProvider(endpointType) ||
-      isDocumentSupportedProvider(currentProvider) ||
-      isAzureWithResponsesApi
-    );
-  }, [provider, endpoint, endpointType, useResponsesApi]);
-
-  const getOptionMeta = (value: EToolResources | undefined) => {
-    switch (value) {
-      case EToolResources.file_search:
-        return {
-          label: localize('com_ui_upload_file_search'),
-          icon: <FileSearch className="icon-md" />,
-        };
-      case EToolResources.execute_code:
-        return {
-          label: localize('com_ui_upload_code_environment'),
-          icon: <TerminalSquareIcon className="icon-md" />,
-        };
-      case EToolResources.context:
-        return {
-          label: localize('com_ui_upload_ocr_text'),
-          icon: <FileType2Icon className="icon-md" />,
-        };
-      default:
-        return isProviderDocSupported
-          ? {
-              label: localize('com_ui_upload_provider'),
-              icon: <FileImageIcon className="icon-md" />,
-            }
-          : {
-              label: localize('com_ui_upload_image_input'),
-              icon: <ImageUpIcon className="icon-md" />,
-            };
-    }
-  };
+  const getOptionMeta = () => ({
+    label: localize('com_ui_upload_files'),
+    icon: <FileUp className="icon-md" />,
+  });
 
   const options = useMemo(() => getOptions(files), [getOptions, files]);
 
@@ -95,7 +36,7 @@ const DragDropModal = () => {
         main={
           <div className="flex flex-col gap-2">
             {options.map((value) => {
-              const { label, icon } = getOptionMeta(value);
+              const { label, icon } = getOptionMeta();
               return (
                 <button
                   key={value ?? 'provider'}

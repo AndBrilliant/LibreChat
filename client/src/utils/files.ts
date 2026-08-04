@@ -12,8 +12,6 @@ import {
   inferMimeType,
   excelMimeTypes,
   EToolResources,
-  retrievalMimeTypes,
-  codeInterpreterMimeTypes,
   fileConfig as defaultFileConfig,
 } from 'librechat-data-provider';
 import type { TFile, EndpointFileConfig, FileConfig } from 'librechat-data-provider';
@@ -320,48 +318,21 @@ export const validateFiles = ({
   return true;
 };
 
-export type UploadOptionContext = {
-  provider?: string | null;
-  endpoint?: string | null;
-  endpointType?: string | null;
-  useResponsesApi?: boolean;
-  fileSearchEnabled: boolean;
-  codeEnabled: boolean;
-  contextEnabled: boolean;
-  fileSearchAllowedByAgent: boolean;
-  codeAllowedByAgent: boolean;
-  fileConfig: FileConfig | null;
-  endpointSupportedMimeTypes?: RegExp[];
-};
-
-// ADR fork: always viable, any file type. This is the shared gate behind
-// the drag-drop upload-options list (getViableUploadOptions) as well as
-// AttachFileMenu's menu — every attachment gets diverted to the sandbox
-// server-side (BaseClient.js processAttachments) regardless of type, so
-// native per-provider attachment support no longer determines what the UI
-// offers. Previously this excluded the "Upload to Provider" option
-// entirely for file types outside a provider's native support (e.g. a
-// .zip on a provider without native document support never even showed
-// as a choice).
-const isProviderAttachType = (): boolean => true;
-
-const isContextType = (type: string, fileConfig: FileConfig | null): boolean =>
-  checkType(type, [
-    ...(fileConfig?.text?.supportedMimeTypes || []),
-    ...(fileConfig?.ocr?.supportedMimeTypes || []),
-    ...(fileConfig?.stt?.supportedMimeTypes || []),
-  ]);
+// ADR fork: every attachment, from every upload path (paperclip, drag-drop,
+// paste), is diverted to the sandbox server-side (BaseClient.js
+// processAttachments) before it ever reaches the model, regardless of type
+// or which tool_resource it's nominally tagged with. There is no longer a
+// meaningful "where should this go" choice — upstream LibreChat's
+// per-provider/per-capability branching (native attach vs. file_search vs.
+// code interpreter vs. OCR context) all collapse to the same server-side
+// behavior now, so the UI always offers exactly one destination
+// (`undefined`, direct attach) instead of prompting.
 
 /**
- * Upload destinations a file set can be routed to, given the active endpoint and agent
- * capabilities. `undefined` is direct provider attachment; the rest are tool resources.
- * Each option requires every file to be valid for it, so the caller can decide between
- * auto-routing (one option), prompting (multiple), or rejecting (none).
+ * Upload destination(s) a file set can be routed to. Always resolves to a single
+ * destination (or none, for an empty/unrecognized file set) — see note above.
  */
-export const getViableUploadOptions = (
-  fileList: File[],
-  ctx: UploadOptionContext,
-): (EToolResources | undefined)[] => {
+export const getViableUploadOptions = (fileList: File[]): (EToolResources | undefined)[] => {
   if (fileList.length === 0) {
     return [];
   }
@@ -369,31 +340,7 @@ export const getViableUploadOptions = (
   if (types.some((type) => !type)) {
     return [];
   }
-  const every = (predicate: (type: string) => boolean) =>
-    types.every((type) => predicate(type as string));
-
-  const options: (EToolResources | undefined)[] = [];
-  if (every((type) => isProviderAttachType(type, ctx))) {
-    options.push(undefined);
-  }
-  if (
-    ctx.fileSearchEnabled &&
-    ctx.fileSearchAllowedByAgent &&
-    every((type) => !type.startsWith('image/') && checkType(type, retrievalMimeTypes))
-  ) {
-    options.push(EToolResources.file_search);
-  }
-  if (
-    ctx.codeEnabled &&
-    ctx.codeAllowedByAgent &&
-    every((type) => checkType(type, codeInterpreterMimeTypes))
-  ) {
-    options.push(EToolResources.execute_code);
-  }
-  if (ctx.contextEnabled && every((type) => isContextType(type, ctx.fileConfig))) {
-    options.push(EToolResources.context);
-  }
-  return options;
+  return [undefined];
 };
 
 export function sortPagesByRelevance(
