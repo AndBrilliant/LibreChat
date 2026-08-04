@@ -171,6 +171,7 @@ function MessageParts(props: TMessageProps) {
                     conversationId={conversation?.conversationId}
                     isLatestMessage={messageId === latestMessageId}
                     content={message.content as Array<TMessageContentParts | undefined>}
+                    unfinished={message.unfinished}
                   />
                 </div>
                 {isLast && isSubmitting ? (

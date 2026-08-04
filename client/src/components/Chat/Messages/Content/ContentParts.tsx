@@ -10,7 +10,7 @@ import type { ReactNode, ReactElement } from 'react';
 import type { ToolCallGroupExpansionState } from './ToolCallGroup';
 import { mapAttachments, filterAttachmentsForPart, groupSequentialToolCalls } from '~/utils';
 import { ParallelContentRenderer, type PartWithIndex } from './ParallelContent';
-import { EditTextPart, EmptyText, AgentUpdate } from './Parts';
+import { EditTextPart, EmptyText, AgentUpdate, EndedIncomplete } from './Parts';
 import { lastVisibleContentIdx } from '~/utils/activityLabels';
 import { MessageContext, SearchContext } from '~/Providers';
 import PendingSkillCall from './Parts/PendingSkillCall';
@@ -140,6 +140,8 @@ type ContentPartsProps = {
   isLast: boolean;
   isSubmitting: boolean;
   isLatestMessage?: boolean;
+  /** Turn ended without the model reacting to its own last tool call — see EndedIncomplete. */
+  unfinished?: boolean;
   edit?: boolean;
   enterEdit?: (cancel?: boolean) => void | null | undefined;
   siblingIdx?: number;
@@ -172,6 +174,7 @@ const ContentParts = memo(function ContentParts({
   isCreatedByUser,
   isLatestMessage,
   createdAt,
+  unfinished,
 }: ContentPartsProps) {
   const attachmentMap = useMemo(() => mapAttachments(attachments ?? []), [attachments]);
   const effectiveIsSubmitting = isLatestMessage ? isSubmitting : false;
@@ -436,6 +439,8 @@ const ContentParts = memo(function ContentParts({
 
   const safeContent = content ?? [];
   const showEmptyCursor = safeContent.length === 0 && effectiveIsSubmitting;
+  const showIncompleteNotice =
+    unfinished === true && !effectiveIsSubmitting && !isCreatedByUser;
   /** Skips trailing BLANK label reservations — they render nothing, and
    *  counting one as last would strip the streaming cursor from the last
    *  VISIBLE part until the next delta. */
@@ -458,6 +463,7 @@ const ContentParts = memo(function ContentParts({
           renderPart={renderPart}
           renderResumeAttribution={renderResumeAttribution}
         />
+        {showIncompleteNotice && <EndedIncomplete />}
       </ApprovalProvider>
     );
   }
@@ -509,6 +515,7 @@ const ContentParts = memo(function ContentParts({
           );
           return nodes;
         })}
+        {showIncompleteNotice && <EndedIncomplete />}
       </SearchContext.Provider>
     </ApprovalProvider>
   );

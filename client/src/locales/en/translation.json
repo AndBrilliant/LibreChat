@@ -1674,6 +1674,7 @@
   "com_ui_resource": "resource",
   "com_ui_respond": "Respond",
   "com_ui_response": "Response",
+  "com_ui_response_incomplete": "The response is incomplete; it's either still processing, was cancelled, or censored. Refresh or try a different prompt.",
   "com_ui_result": "Result",
   "com_ui_result_found": "{{count}} result found",
   "com_ui_results_found": "{{count}} results found",

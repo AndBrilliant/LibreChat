@@ -159,6 +159,25 @@ const rehydrateMessageFileRefs = (refs, filesById, { preserveDisplayOnly = false
   return files.length > 0 ? files : undefined;
 };
 
+/**
+ * Detects a turn that ends immediately after a tool call with no reaction to its
+ * result — the model never got (or took) the chance to synthesize an answer from
+ * what the tool returned. Some providers occasionally drop a completion's content
+ * entirely while still reporting a normal finish (observed with GLM 5.2 / Z-AI:
+ * `finish_reason: "tool_calls"` with an empty parsed message), which otherwise
+ * saves as a silent, falsely "complete" response the user has no way to tell
+ * apart from a real answer short of noticing nothing useful showed up.
+ * @param {TMessage} message
+ * @returns {boolean}
+ */
+const endsOnDanglingToolCall = (message) => {
+  const content = message?.content;
+  if (!Array.isArray(content) || content.length === 0) {
+    return false;
+  }
+  return content[content.length - 1]?.type === ContentTypes.TOOL_CALL;
+};
+
 class BaseClient {
   constructor(apiKey, options = {}) {
     this.apiKey = apiKey;
@@ -967,7 +986,7 @@ class BaseClient {
       {
         ...message,
         endpoint: options.endpoint,
-        unfinished: false,
+        unfinished: endsOnDanglingToolCall(message),
         user,
         ...(hasAddedConvo && { addedConvo: true }),
       },

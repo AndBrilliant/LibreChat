@@ -221,6 +221,7 @@ const ContentRender = memo(function ContentRender({
               createdAt={msg.createdAt ?? msg.clientTimestamp}
               conversationId={conversation?.conversationId}
               content={msg.content as Array<TMessageContentParts | undefined>}
+              unfinished={msg.unfinished}
             />
           </div>
           {hasNoChildren && isSubmitting ? (
