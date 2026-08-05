@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 const { logger } = require('@librechat/data-schemas');
+const { initializeModel } = require('@librechat/agents');
 const {
   countTokens,
   checkBalance,
@@ -176,6 +177,74 @@ const endsOnDanglingToolCall = (message) => {
     return false;
   }
   return content[content.length - 1]?.type === ContentTypes.TOOL_CALL;
+};
+
+/**
+ * Builds a compact, human-readable summary of the last (dangling) tool call
+ * for the nudge prompt below.
+ * @param {TMessage} message
+ * @returns {string}
+ */
+const summarizeDanglingToolCall = (message) => {
+  const content = message.content;
+  const last = content[content.length - 1];
+  const toolCall = last?.tool_call ?? {};
+  const name = toolCall.name ?? 'unknown_tool';
+  const args = toolCall.args;
+  const output = toolCall.output;
+  const fmt = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
+  return `Tool called: ${name}\nArguments: ${fmt(args)}\nResult: ${fmt(output)}`;
+};
+
+/**
+ * Mitigation for a known GLM-5.2 / Z-AI quirk (see `endsOnDanglingToolCall`):
+ * when a turn ends immediately after a tool call with no reaction, make ONE
+ * isolated, non-streaming nudge call to the same agent's model asking it to
+ * respond to the tool result already in hand. Deliberately outside the
+ * streaming graph/job-management pipeline: single attempt, no recursion, and
+ * any failure here just falls back to the existing "mark unfinished" behavior
+ * — it can never make things worse than before this existed.
+ * @param {TMessage} message
+ * @param {BaseClient} client
+ * @returns {Promise<boolean>} true if the nudge produced usable text (message.content was mutated)
+ */
+const attemptDanglingToolCallNudge = async (message, client) => {
+  const agent = client?.options?.agent;
+  const provider = agent?.provider;
+  const modelParams = agent?.model_parameters;
+  if (!provider || !modelParams) {
+    return false;
+  }
+  try {
+    const model = initializeModel({
+      provider,
+      clientOptions: { ...modelParams, streaming: false },
+    });
+    const prompt =
+      summarizeDanglingToolCall(message) +
+      '\n\nRespond to the user now based on the tool result above. Do not call the tool again.';
+    const response = await model.invoke(prompt);
+    const raw = response?.content;
+    const text =
+      typeof raw === 'string'
+        ? raw
+        : Array.isArray(raw)
+          ? raw.map((p) => (typeof p === 'string' ? p : p?.text ?? '')).join('')
+          : '';
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return false;
+    }
+    message.content.push({ type: ContentTypes.TEXT, text: trimmed });
+    message.text = message.text ? `${message.text}\n${trimmed}` : trimmed;
+    return true;
+  } catch (error) {
+    logger.warn(
+      '[BaseClient] Dangling tool-call nudge failed, falling back to unfinished marker:',
+      error,
+    );
+    return false;
+  }
 };
 
 class BaseClient {
@@ -981,12 +1050,20 @@ class BaseClient {
       isTemporary: options?.req?.body?.isTemporary,
       interfaceConfig: options?.req?.config?.interfaceConfig,
     };
+    let dangling = endsOnDanglingToolCall(message);
+    if (dangling) {
+      const recovered = await attemptDanglingToolCallNudge(message, this);
+      if (recovered) {
+        dangling = false;
+      }
+    }
+
     const savedMessage = await db.saveMessage(
       reqCtx,
       {
         ...message,
         endpoint: options.endpoint,
-        unfinished: endsOnDanglingToolCall(message),
+        unfinished: dangling,
         user,
         ...(hasAddedConvo && { addedConvo: true }),
       },
