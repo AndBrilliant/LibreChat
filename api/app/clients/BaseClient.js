@@ -180,6 +180,27 @@ const endsOnDanglingToolCall = (message) => {
 };
 
 /**
+ * Broader umbrella over `endsOnDanglingToolCall`: also catches a turn that
+ * comes back with genuinely nothing at all — no text, no content parts,
+ * no tool call. Observed as the same underlying GLM-5.2 / Z-AI quirk
+ * (silently empty completion) but on a plain conversational turn with no
+ * tool involved, not just the tool-call-then-silence shape.
+ * @param {TMessage} message
+ * @returns {boolean}
+ */
+const needsCompletionNudge = (message) => {
+  const hasText = typeof message?.text === 'string' && message.text.trim().length > 0;
+  if (hasText) {
+    return false;
+  }
+  const content = message?.content;
+  if (!Array.isArray(content) || content.length === 0) {
+    return true;
+  }
+  return content[content.length - 1]?.type === ContentTypes.TOOL_CALL;
+};
+
+/**
  * Builds a compact, human-readable summary of the last (dangling) tool call
  * for the nudge prompt below.
  * @param {TMessage} message
@@ -197,12 +218,38 @@ const summarizeDanglingToolCall = (message) => {
 };
 
 /**
- * Mitigation for a known GLM-5.2 / Z-AI quirk (see `endsOnDanglingToolCall`):
- * when a turn ends immediately after a tool call with no reaction, make ONE
- * isolated, non-streaming nudge call to the same agent's model asking it to
- * respond to the tool result already in hand. Deliberately outside the
- * streaming graph/job-management pipeline: single attempt, no recursion, and
- * any failure here just falls back to the existing "mark unfinished" behavior
+ * Best-effort fetch of the user's last message text, for the plain-empty-
+ * completion nudge prompt (no tool call to summarize instead). Never throws
+ * — returns null on any failure so the caller can fall back to a generic
+ * prompt; this is a nicety, not something worth risking the save path over.
+ * @param {TMessage} message
+ * @returns {Promise<string | null>}
+ */
+const getParentUserText = async (message) => {
+  try {
+    if (!message?.conversationId || !message?.parentMessageId) {
+      return null;
+    }
+    const messages = await db.getMessages({
+      conversationId: message.conversationId,
+      messageId: message.parentMessageId,
+    });
+    const parent = Array.isArray(messages) ? messages[0] : messages;
+    const text = parent?.text;
+    return typeof text === 'string' && text.trim().length > 0 ? text.trim() : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Mitigation for a known GLM-5.2 / Z-AI quirk (see `needsCompletionNudge`):
+ * when a turn comes back with no usable content at all — whether that's
+ * silence right after a tool call, or a flat-out empty completion on a plain
+ * turn — make ONE isolated, non-streaming nudge call to the same agent's
+ * model asking it to actually respond. Deliberately outside the streaming
+ * graph/job-management pipeline: single attempt, no recursion, and any
+ * failure here just falls back to the existing "mark unfinished" behavior
  * — it can never make things worse than before this existed.
  * @param {TMessage} message
  * @param {BaseClient} client
@@ -216,13 +263,26 @@ const attemptDanglingToolCallNudge = async (message, client) => {
     return false;
   }
   try {
+    const content = message?.content;
+    const endsInToolCall =
+      Array.isArray(content) &&
+      content.length > 0 &&
+      content[content.length - 1]?.type === ContentTypes.TOOL_CALL;
+    let prompt;
+    if (endsInToolCall) {
+      prompt =
+        summarizeDanglingToolCall(message) +
+        '\n\nRespond to the user now based on the tool result above. Do not call the tool again.';
+    } else {
+      const userText = await getParentUserText(message);
+      prompt = userText
+        ? `The user's last message was: "${userText}"\n\nRespond to it now.`
+        : "Respond to the user's last message now.";
+    }
     const model = initializeModel({
       provider,
       clientOptions: { ...modelParams, streaming: false },
     });
-    const prompt =
-      summarizeDanglingToolCall(message) +
-      '\n\nRespond to the user now based on the tool result above. Do not call the tool again.';
     const response = await model.invoke(prompt);
     const raw = response?.content;
     const text =
@@ -235,12 +295,15 @@ const attemptDanglingToolCallNudge = async (message, client) => {
     if (!trimmed) {
       return false;
     }
+    if (!Array.isArray(message.content)) {
+      message.content = [];
+    }
     message.content.push({ type: ContentTypes.TEXT, text: trimmed });
     message.text = message.text ? `${message.text}\n${trimmed}` : trimmed;
     return true;
   } catch (error) {
     logger.warn(
-      '[BaseClient] Dangling tool-call nudge failed, falling back to unfinished marker:',
+      '[BaseClient] Empty-completion nudge failed, falling back to unfinished marker:',
       error,
     );
     return false;
@@ -1050,7 +1113,7 @@ class BaseClient {
       isTemporary: options?.req?.body?.isTemporary,
       interfaceConfig: options?.req?.config?.interfaceConfig,
     };
-    let dangling = endsOnDanglingToolCall(message);
+    let dangling = needsCompletionNudge(message);
     if (dangling) {
       const recovered = await attemptDanglingToolCallNudge(message, this);
       if (recovered) {
