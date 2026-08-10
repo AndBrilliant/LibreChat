@@ -104,7 +104,12 @@ function TokenUsageIndicator({
         aria-label={localize('com_ui_context_usage')}
         className="z-[200] rounded-xl border border-border-medium bg-surface-secondary p-3 shadow-lg focus:outline-none"
       >
-        <Breakdown view={view} showCost={showCost} currency={currency} />
+        <Breakdown
+          view={view}
+          showCost={showCost}
+          currency={currency}
+          conversationId={conversation?.conversationId}
+        />
       </Ariakit.Popover>
     </>
   );

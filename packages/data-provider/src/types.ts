@@ -146,6 +146,20 @@ export type TPayload = Partial<TMessage> &
     /** Browser IANA timezone (e.g. `America/New_York`) used to resolve local-time prompt variables server-side. */
     timezone?: string;
     /**
+     * ADR fork: the conversation's "Always" note as it stood when Send was
+     * pressed. The server appends it to the tail of this turn and persists it
+     * back onto the conversation, so the box is WYSIWYG: what is in it when
+     * you send is what the model got and what is stored. `''` clears the
+     * stored note; omitted leaves it untouched.
+     */
+    persistentContext?: string;
+    /**
+     * ADR fork: the user asked for a context checkpoint before this turn runs.
+     * Armed from the token-usage gauge and consumed by the submission it rides
+     * on, so it never leaks into a later turn.
+     */
+    forceCompaction?: boolean;
+    /**
      * Stable per-submission idempotency key (uuid) generated once per `ask()`. Identical
      * across the client's start-generation network retries, unique per user action (including
      * regenerate). The server dedups retried start requests on it so a lost/reset response
@@ -217,6 +231,8 @@ export type TSubmission = {
   addedConvo?: TConversation;
   /** Skills the user invoked via the `$` popover for this submission. */
   manualSkills?: string[];
+  /** ADR fork: user armed a context checkpoint for this submission. */
+  forceCompaction?: boolean;
   /** Stable per-submission idempotency key (uuid) forwarded to the server to dedup retried start-generation requests. */
   clientRequestId?: string;
   /** Client-only carry-through for a receipt-bound queued recovery. */

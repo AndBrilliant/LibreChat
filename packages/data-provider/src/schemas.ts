@@ -946,6 +946,11 @@ export const tConversationSchema = z.object({
   endpointType: eModelEndpointSchema.nullable().optional(),
   isArchived: z.boolean().optional(),
   pinned: z.boolean().optional(),
+  /** ADR fork: sticky per-conversation note re-injected at the END of every
+   *  turn (see `injectPersistentContext` in `@librechat/api`). Not part of the
+   *  transcript, so summarization can never compact it away. Empty string is
+   *  meaningful — it means "cleared"; `undefined` means "leave as-is". */
+  persistentContext: z.string().nullable().optional(),
   title: z.string().nullable().or(z.literal('New Chat')).default('New Chat'),
   user: z.string().optional(),
   messages: z.array(z.string()).optional(),

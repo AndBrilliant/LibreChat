@@ -1057,6 +1057,13 @@ const initializeClient = async ({
     attachments: primaryConfig.requestAttachments ?? primaryConfig.attachments,
     agentContextAttachmentsByAgentId,
     endpointType: endpointOption.endpointType,
+    /** ADR fork: read straight off the request body rather than through
+     *  `endpointOption` — the compact per-endpoint convo schemas would drop
+     *  an unknown key, and this is conversation state, not a model param. */
+    persistentContext:
+      typeof req.body?.persistentContext === 'string' ? req.body.persistentContext : undefined,
+    /** ADR fork: user asked for a context checkpoint on this turn. */
+    forceCompaction: req.body?.forceCompaction === true,
     resendFiles: primaryConfig.resendFiles ?? true,
     maxContextTokens: primaryConfig.maxContextTokens,
     endpoint: isEphemeralAgentId(primaryConfig.id) ? primaryConfig.endpoint : EModelEndpoint.agents,

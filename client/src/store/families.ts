@@ -280,6 +280,38 @@ const showSkillsPopoverFamily = atomFamily<boolean, string | number | null>({
 });
 
 /**
+ * ADR fork — which pane the composer is showing: the message for THIS turn,
+ * or the conversation's persistent "Always" note. Per composer index so the
+ * split view's two composers flip independently.
+ */
+const composerTabFamily = atomFamily<'message' | 'always', string | number | null>({
+  key: 'composerTabByIndex',
+  default: 'message',
+});
+
+/**
+ * ADR fork — in-progress edits to the "Always" note, keyed by conversation.
+ * Seeded from `conversation.persistentContext` and committed back to the
+ * conversation on Send (and on flipping back to the message pane). Keyed by
+ * conversation id, not index, so switching chats can't bleed one chat's
+ * standing instructions into another's.
+ */
+const persistentContextDraftByConvoId = atomFamily<string | null, string | null>({
+  key: 'persistentContextDraftByConvoId',
+  default: null,
+});
+
+/**
+ * ADR fork — a context checkpoint armed for the next submission in this
+ * conversation. Drained (read + reset) when the submission is built, so it
+ * applies to exactly one turn and can never silently re-compact later.
+ */
+const pendingCompactionByConvoId = atomFamily<boolean, string | null>({
+  key: 'pendingCompactionByConvoId',
+  default: false,
+});
+
+/**
  * Per-conversation queue of skill names the user invoked manually via the
  * `$` popover for the next submission. Structured channel that the submit
  * pipeline (`useChatFunctions.ask`) drains and pins onto the user message's
@@ -710,6 +742,9 @@ export default {
   useClearSubmissionState,
   showPromptsPopoverFamily,
   showSkillsPopoverFamily,
+  composerTabFamily,
+  persistentContextDraftByConvoId,
+  pendingCompactionByConvoId,
   pendingManualSkillsByConvoId,
   pendingQuotesByConvoId,
   pendingSteersByConvoId,

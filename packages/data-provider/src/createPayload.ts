@@ -24,11 +24,19 @@ export default function createPayload(submission: t.TSubmission) {
     ephemeralAgent,
     endpointOption,
     manualSkills,
+    forceCompaction,
     clientRequestId,
     recoverySteerId,
     expectedPredecessorCreatedAt,
   } = submission;
   const { conversationId } = s.tConvoUpdateSchema.parse(conversation);
+  /** ADR fork: carry the "Always" note verbatim off the conversation. Read
+   *  directly rather than through `tConvoUpdateSchema` so an empty string
+   *  survives as a deliberate clear instead of being normalized away. */
+  const persistentContext =
+    typeof conversation?.persistentContext === 'string'
+      ? conversation.persistentContext
+      : undefined;
   const { endpoint: _e, endpointType } = endpointOption as {
     endpoint: s.EModelEndpoint;
     endpointType?: s.EModelEndpoint;
@@ -55,6 +63,8 @@ export default function createPayload(submission: t.TSubmission) {
     ephemeralAgent: s.isAssistantsEndpoint(endpoint) ? undefined : ephemeralAgent,
     manualSkills: s.isAssistantsEndpoint(endpoint) ? undefined : manualSkills,
     timezone: getUserTimezone(),
+    persistentContext,
+    forceCompaction,
     clientRequestId,
     recoverySteerId,
     expectedPredecessorCreatedAt,

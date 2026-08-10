@@ -40,6 +40,7 @@ export interface IConversation extends Document {
   stop?: string[];
   isArchived?: boolean;
   pinned?: boolean;
+  persistentContext?: string;
   iconURL?: string;
   greeting?: string;
   spec?: string;

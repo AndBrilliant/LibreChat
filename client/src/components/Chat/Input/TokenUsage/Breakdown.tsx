@@ -1,6 +1,7 @@
 import type { TokenUsageView } from '~/hooks/Chat/useTokenUsage';
 import type { CurrencyConfig } from '~/utils';
 import { groupToolTokens, formatTokens, formatCost } from '~/utils';
+import CompactButton from './CompactButton';
 import { useLocalize } from '~/hooks';
 
 interface RowProps {
@@ -30,9 +31,10 @@ interface BreakdownProps {
   view: TokenUsageView;
   showCost: boolean;
   currency?: CurrencyConfig;
+  conversationId?: string | null;
 }
 
-export default function Breakdown({ view, showCost, currency }: BreakdownProps) {
+export default function Breakdown({ view, showCost, currency, conversationId }: BreakdownProps) {
   const localize = useLocalize();
   const { usedTokens, maxTokens, percent, snapshot, snapshotActive, branchUsage, hasUsage } = view;
   /** Show the all-branches total only when it (a) exceeds the active branch —
@@ -215,6 +217,9 @@ export default function Breakdown({ view, showCost, currency }: BreakdownProps) 
           </div>
         </>
       )}
+
+      <div className="border-t border-border-light" role="separator" />
+      <CompactButton conversationId={conversationId} percent={view.percent} />
     </div>
   );
 }

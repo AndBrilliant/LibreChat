@@ -264,6 +264,51 @@ export default function useChatFunctions({
     [],
   );
 
+  /**
+   * ADR fork — resolve the conversation's persistent "Always" note at submit
+   * time, from the same snapshot idiom as the drains above.
+   *
+   * Read from a snapshot rather than a subscribed value on purpose: the draft
+   * atom is the single source of truth for what the box currently shows, and
+   * reading it at submit time means the value that ships is the value on
+   * screen when Send was pressed — no commit step to order against, and no
+   * subscription coupling this hook to every keystroke in the note.
+   *
+   * `null` means "no local edit this session" — fall back to whatever is
+   * already stored on the conversation. An empty string is NOT null: it is a
+   * deliberate clear and must win over the stored value.
+   */
+  const readPersistentContextDraft = useRecoilCallback(
+    ({ snapshot }) =>
+      (convoId: string, stored?: string | null): string | undefined => {
+        const loadable = snapshot.getLoadable(store.persistentContextDraftByConvoId(convoId));
+        const draft = loadable.state === 'hasValue' ? (loadable.contents as string | null) : null;
+        if (typeof draft === 'string') {
+          return draft;
+        }
+        return typeof stored === 'string' ? stored : undefined;
+      },
+    [],
+  );
+
+  /**
+   * ADR fork — read + reset the armed context checkpoint, mirroring the drains
+   * above. Reset in the same snapshot so a checkpoint applies to exactly one
+   * turn: leaving it armed would silently re-compact every subsequent send.
+   */
+  const drainPendingCompaction = useRecoilCallback(
+    ({ snapshot, reset }) =>
+      (convoId: string): boolean => {
+        const loadable = snapshot.getLoadable(store.pendingCompactionByConvoId(convoId));
+        const armed = loadable.state === 'hasValue' ? loadable.contents === true : false;
+        if (armed) {
+          reset(store.pendingCompactionByConvoId(convoId));
+        }
+        return armed;
+      },
+    [],
+  );
+
   const ask: TAskFunction = (
     {
       text,
@@ -661,6 +706,13 @@ export default function useChatFunctions({
         ...conversation,
         ...(chatProjectId ? { chatProjectId } : {}),
         conversationId,
+        /** Keyed by the id the composer used, not the resolved one: on a new
+         *  chat the composer drafts under NEW_CONVO while `conversationId`
+         *  here may already be null/assigned. */
+        persistentContext: readPersistentContextDraft(
+          immutableConversation?.conversationId ?? Constants.NEW_CONVO,
+          conversation?.persistentContext,
+        ),
       },
       endpointOption,
       userMessage: {
@@ -680,6 +732,9 @@ export default function useChatFunctions({
       editPrefixLength,
       addedConvo,
       manualSkills: manualSkills.length > 0 ? manualSkills : undefined,
+      forceCompaction:
+        drainPendingCompaction(immutableConversation?.conversationId ?? Constants.NEW_CONVO) ||
+        undefined,
       clientRequestId,
       recoverySteerId: overrideRecoverySteerId,
       expectedPredecessorCreatedAt: overrideExpectedPredecessorCreatedAt,

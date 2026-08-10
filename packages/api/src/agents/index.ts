@@ -25,6 +25,8 @@ export * from './usage';
 export * from './resources';
 export * from './responses';
 export * from './skills';
+export * from './persistentContext';
+export * from './compaction';
 export * from './phases';
 export * from './startup';
 export * from './skillConfigurable';

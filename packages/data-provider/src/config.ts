@@ -70,6 +70,15 @@ export const excludedKeys = new Set([
   'spec',
   'disableParams',
   'chatProjectId',
+  /**
+   * ADR fork: the persistent "Always" note. Excluded so the reconciliation
+   * loop in `saveMessageToDatabase` cannot `$unset` it — that loop deletes any
+   * stored conversation field the current turn did not resend, which would
+   * silently wipe a user's standing instructions on the first submit path that
+   * omits the field (an API-direct caller, say). It still updates normally
+   * when a value IS sent, including `''` to clear it.
+   */
+  'persistentContext',
 ]);
 
 export enum SettingsViews {

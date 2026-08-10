@@ -75,6 +75,8 @@ const {
   prependQuotes,
   hydrateMissingIndexTokenCounts,
   injectSkillPrimes,
+  injectPersistentContext,
+  resolveSummarizationConfig,
   collectFreshSkillPrimeNames,
   isSkillPrimeMessage,
   collectFileIds,
@@ -981,6 +983,14 @@ class AgentClient extends BaseClient {
           resendFiles: this.options.resendFiles,
           imageDetail: this.options.imageDetail,
           maxContextTokens: this.maxContextTokens,
+          /** ADR fork: persist the "Always" note alongside the conversation.
+           *  `removeNullishValues` runs WITHOUT `removeEmptyStrings` here,
+           *  which is load-bearing: `''` must survive so clearing the box
+           *  actually clears the stored note, while `undefined` is stripped.
+           *  `persistentContext` is also in `excludedKeys` so that a stripped
+           *  `undefined` leaves the stored note alone instead of being
+           *  `$unset` by the reconciliation loop in `saveMessageToDatabase`. */
+          persistentContext: this.options.persistentContext,
         },
         // TODO: PARSE OPTIONS BY PROVIDER, MAY CONTAIN SENSITIVE DATA
         runOptions,
@@ -2390,6 +2400,31 @@ class AgentClient extends BaseClient {
         }
       }
 
+      /**
+       * ADR fork: persistent conversation context ("Always" note).
+       *
+       * Appended to the tail of the final human message on EVERY turn, after
+       * skill priming so it lands last and nothing displaces it. Because it
+       * is re-injected from `convo.persistentContext` rather than living in
+       * the transcript, compaction can never eat it — which is the whole
+       * reason it exists alongside on-demand compression.
+       */
+      const persistentResult = injectPersistentContext({
+        initialMessages,
+        indexTokenCountMap,
+        persistentContext: this.options.persistentContext,
+        tokenCounter,
+      });
+      indexTokenCountMap = persistentResult.indexTokenCountMap;
+      if (persistentResult.injected) {
+        logger.debug(
+          `[AgentClient] Injected persistent context at message index ${persistentResult.targetIdx}` +
+            (persistentResult.truncatedChars
+              ? ` (truncated ${persistentResult.truncatedChars} chars)`
+              : ''),
+        );
+      }
+
       if (indexTokenCountMap && isEnabled(process.env.AGENT_DEBUG_LOGGING)) {
         const entries = Object.entries(indexTokenCountMap);
         const perMsg = entries.map(([idx, count]) => {
@@ -2558,7 +2593,14 @@ class AgentClient extends BaseClient {
           requestBody: config.configurable.requestBody,
           user: createSafeUser(this.options.req?.user),
           tenantId: this.options.req?.user?.tenantId,
-          summarizationConfig: appConfig?.summarization,
+          /** ADR fork: `resolveSummarizationConfig` returns the configured
+           *  block unchanged unless this turn was flagged for on-demand
+           *  compaction. The resume path below deliberately does NOT force —
+           *  a checkpoint belongs to the submission that asked for it. */
+          summarizationConfig: resolveSummarizationConfig(
+            appConfig?.summarization,
+            this.options.forceCompaction,
+          ),
           appConfig,
           tokenCounter,
           /** Bills subagent child-run model calls — child graphs execute

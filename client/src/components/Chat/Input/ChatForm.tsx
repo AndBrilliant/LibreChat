@@ -34,6 +34,9 @@ import PendingSteerChips from './PendingSteerChips';
 import PendingQuoteChips from './PendingQuoteChips';
 import AttachFileChat from './Files/AttachFileChat';
 import useSteering from '~/hooks/Chat/useSteering';
+import usePersistentContext from '~/hooks/Chat/usePersistentContext';
+import PersistentContextArea from './PersistentContextArea';
+import ComposerTabs from './ComposerTabs';
 import FileFormChat from './Files/FileFormChat';
 import InFlightSteers from './InFlightSteers';
 import TextareaHeader from './TextareaHeader';
@@ -174,6 +177,11 @@ const ChatForm = memo(function ChatForm({
   }, []);
 
   const answerMode = useAskAnswerMode(conversationId);
+
+  /** ADR fork: the "Always" note pane. Its draft is read straight from Recoil
+   *  at submit time (`useChatFunctions`), so there is nothing to commit here
+   *  and no ordering to race against the send. */
+  const persistentContext = usePersistentContext(index, conversation);
 
   useAutoSave({
     files,
@@ -551,6 +559,14 @@ const ChatForm = memo(function ChatForm({
               )}
             >
               <TextareaHeader addedConvo={addedConvo} setAddedConvo={setAddedConvo} />
+              {endpoint && !answerMode.active && (
+                <ComposerTabs
+                  tab={persistentContext.tab}
+                  onSelect={persistentContext.setTab}
+                  hasNote={persistentContext.hasNote}
+                  disabled={disableInputs}
+                />
+              )}
               <PendingManualSkillsChips conversationId={conversationId} />
               {quotesEnabled && <PendingQuoteChips conversationId={conversationId} />}
               {steering.enabled && (
@@ -574,8 +590,26 @@ const ChatForm = memo(function ChatForm({
                 setFiles={setFiles}
                 setFilesLoading={setFilesLoading}
               />
+              {endpoint && persistentContext.tab === 'always' && (
+                <PersistentContextArea
+                  value={persistentContext.draft}
+                  onChange={persistentContext.setDraft}
+                  disabled={disableInputs}
+                  isRTL={isRTL}
+                />
+              )}
               {endpoint && (
-                <div className={cn('flex', isRTL ? 'flex-row-reverse' : 'flex-row')}>
+                /** Hidden rather than unmounted while the Always pane is up:
+                 *  the message textarea carries form registration, draft
+                 *  autosave, focus effects and the mention/skill anchors, and
+                 *  remounting it on every tab flip would churn all of that. */
+                <div
+                  className={cn(
+                    'flex',
+                    isRTL ? 'flex-row-reverse' : 'flex-row',
+                    persistentContext.tab === 'always' && 'hidden',
+                  )}
+                >
                   <div
                     className="relative flex-1"
                     style={

@@ -52,6 +52,12 @@ const convoSchema: Schema<IConversation> = new Schema(
     pinned: {
       type: Boolean,
     },
+    /** ADR fork: sticky per-conversation note appended to the end of every
+     *  turn's payload. Deliberately NOT part of `conversationPreset` — a
+     *  preset is reused across chats, this is scoped to one task. */
+    persistentContext: {
+      type: String,
+    },
   },
   { timestamps: true },
 );
