@@ -251,4 +251,40 @@ y$ which spans lines`;
     const expected = 'Revenue: \\$5M to \\$10M, funding: \\$1.5B, price: \\$5K';
     expect(preprocessLaTeX(content)).toBe(expected);
   });
+
+  // Regression: the currency heuristic used to treat `$2m_e$` as the amount "$2m"
+  // ('m' is a magnitude suffix, '_' the trailing boundary), escaping the opening
+  // delimiter. The orphaned closing `$` then paired with the next `$` in the
+  // message and swallowed every word between them into one math span, which
+  // rendered as run-together italics because math mode discards whitespace.
+  describe('math beginning with a digit is not mistaken for currency', () => {
+    test('does not escape $2m_e$', () => {
+      expect(preprocessLaTeX('$2m_e$ is the separatrix energy')).toBe(
+        '$$2m_e$$ is the separatrix energy',
+      );
+    });
+
+    test('does not swallow prose between two digit-leading math spans', () => {
+      const content = '**$2m_e$ is the energy.** So $2m_e$ is not free.';
+      const expected = '**$$2m_e$$ is the energy.** So $$2m_e$$ is not free.';
+      expect(preprocessLaTeX(content)).toBe(expected);
+    });
+
+    test.each([
+      ['$2\\pi$', '$$2\\pi$$'],
+      ['$0.511$', '$$0.511$$'],
+      ['$95.12$', '$$95.12$$'],
+      ['$2\\times10^{-5}$', '$$2\\times10^{-5}$$'],
+      ['$5k_B$', '$$5k_B$$'],
+      ['$1M_\\odot$', '$$1M_\\odot$$'],
+    ])('preserves %s', (content, expected) => {
+      expect(preprocessLaTeX(content)).toBe(expected);
+    });
+
+    test('still escapes currency that sits alongside real math', () => {
+      expect(preprocessLaTeX('costs $25 and $x$ is a var')).toBe(
+        'costs \\$25 and $$x$$ is a var',
+      );
+    });
+  });
 });

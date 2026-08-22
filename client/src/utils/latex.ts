@@ -3,8 +3,17 @@ const MHCHEM_CE_REGEX = /\$\\ce\{/g;
 const MHCHEM_PU_REGEX = /\$\\pu\{/g;
 const MHCHEM_CE_ESCAPED_REGEX = /\$\\\\ce\{[^}]*\}\$/g;
 const MHCHEM_PU_ESCAPED_REGEX = /\$\\\\pu\{[^}]*\}\$/g;
-const CURRENCY_REGEX =
-  /(?<![\\$])\$(?!\$)(?=\d+(?:,\d{3})*(?:\.\d+)?(?:[KMBkmb])?(?:\s|$|[^a-zA-Z\d]))/g;
+// The digits of a currency amount: 1,000 / 2.50 / 2.5M
+const CURRENCY_AMOUNT_REGEX = /^\d+(?:,\d{3})*(?:\.\d+)?(?:[KMBkmb])?/;
+
+// Characters that may legitimately end a currency amount. Deliberately EXCLUDES the
+// LaTeX structural characters `_ ^ \ {` -- `$2m_e$` is two electron masses, not two
+// million dollars, and reading it as currency escapes its opening delimiter and leaves
+// the closing `$` to pair with the next `$` in the message, swallowing the prose
+// between them into a single math span.
+const CURRENCY_TERMINATORS = new Set([
+  ',', '.', ';', ':', '!', '?', ')', ']', '}', '%', '&', '"', "'",
+]);
 const SINGLE_DOLLAR_REGEX = /(?<!\\)\$(?!\$)((?:[^$\n]|\\[$])+?)(?<!\\)(?<!`)\$(?!\$)/g;
 
 /**
@@ -96,6 +105,74 @@ function isInCodeBlock(position: number, codeRegions: Array<[number, number]>): 
 }
 
 /**
+ * Decides whether the `$` at `index` begins a currency amount rather than a math span.
+ * @param text The content being scanned
+ * @param index Position of the `$`
+ * @param insideMath Whether an earlier `$` on this pass left us inside a math span
+ * @returns True if this `$` should be escaped as currency
+ */
+function isCurrencyAt(text: string, index: number, insideMath: boolean): boolean {
+  const amount = CURRENCY_AMOUNT_REGEX.exec(text.slice(index + 1));
+  if (!amount || amount[0].length === 0) {
+    return false;
+  }
+  const after = text[index + 1 + amount[0].length];
+  if (after === undefined || /\s/.test(after)) {
+    return true;
+  }
+  // A `$` right after the digits only reads as currency when we are already inside a
+  // math span (`$A = \$1,100$`). Outside one, `$0.511$` is a math span, not an amount.
+  if (after === '$') {
+    return insideMath;
+  }
+  return CURRENCY_TERMINATORS.has(after);
+}
+
+/**
+ * Escapes currency dollar signs, tracking math-span state left to right so that a
+ * delimiter is never mistaken for an amount (or vice versa).
+ * @param content The content to scan
+ * @param codeRegions Code regions to leave untouched
+ * @returns The content with currency `$` escaped as `\$`
+ */
+function escapeCurrency(content: string, codeRegions: Array<[number, number]>): string {
+  const out: string[] = [];
+  let insideMath = false;
+  let i = 0;
+
+  while (i < content.length) {
+    const char = content[i];
+
+    if (char === '\\' && content[i + 1] === '$') {
+      out.push('\\$');
+      i += 2;
+      continue;
+    }
+    if (char !== '$' || isInCodeBlock(i, codeRegions)) {
+      out.push(char);
+      i += 1;
+      continue;
+    }
+    if (content[i + 1] === '$') {
+      out.push('$$');
+      insideMath = !insideMath;
+      i += 2;
+      continue;
+    }
+    if (isCurrencyAt(content, i, insideMath)) {
+      out.push('\\$');
+      i += 1;
+      continue;
+    }
+    out.push('$');
+    insideMath = !insideMath;
+    i += 1;
+  }
+
+  return out.join('');
+}
+
+/**
  * Preprocesses LaTeX content by escaping currency indicators and converting single dollar math delimiters.
  * Optimized for high-frequency execution.
  * @param content The input string containing LaTeX expressions.
@@ -115,26 +192,12 @@ export function preprocessLaTeX(content: string): string {
   const codeRegions = findCodeBlockRegions(processed);
 
   // First pass: escape currency dollar signs
-  const parts: string[] = [];
-  let lastIndex = 0;
-
-  // Reset regex for reuse
-  CURRENCY_REGEX.lastIndex = 0;
-
-  let match: RegExpExecArray | null;
-  while ((match = CURRENCY_REGEX.exec(processed)) !== null) {
-    if (!isInCodeBlock(match.index, codeRegions)) {
-      parts.push(processed.substring(lastIndex, match.index));
-      parts.push('\\$');
-      lastIndex = match.index + 1;
-    }
-  }
-  parts.push(processed.substring(lastIndex));
-  processed = parts.join('');
+  processed = escapeCurrency(processed, codeRegions);
 
   // Second pass: convert single dollar delimiters to double dollars
   const result: string[] = [];
-  lastIndex = 0;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
 
   // Reset regex for reuse
   SINGLE_DOLLAR_REGEX.lastIndex = 0;
