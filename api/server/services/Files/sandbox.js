@@ -141,7 +141,7 @@ async function divertImagesToSandbox(conversationId, imageUrls, files) {
 
     if (!notes.length) return null;
 
-    return `[${notes.length} image(s) uploaded to sandbox session ${sessionId}: ${notes.join(', ')}. Use the sandbox MCP tools (sandbox_exec, sandbox_read_file) with this session_id to view or process them — the raw image data was not sent to you directly.]`;
+    return `[${notes.length} image(s) uploaded to sandbox session ${sessionId}: ${notes.join(', ')}. The raw image data was not sent to you directly. To SEE an image, call sandbox_describe_image with this session_id and filename — that is the only way. For text on a clean scan, sandbox_exec with tesseract is cheaper. To hand one back to the user, sandbox_create_download_link. Do NOT call sandbox_read_file on an image: it refuses image bytes.]`;
   } catch (e) {
     logger.error('[sandbox] image diversion failed, falling back to normal image attachment', e);
     return null;
@@ -190,7 +190,7 @@ async function divertAttachmentsToSandbox(conversationId, attachments, getStrate
 
     if (!notes.length) return null;
 
-    return `[${notes.length} ${kindLabel}(s) uploaded to sandbox session ${sessionId}: ${notes.join(', ')}. Use the sandbox MCP tools (sandbox_exec, sandbox_read_file) with this session_id to view or process them — the raw file content was not sent to you directly.]`;
+    return `[${notes.length} ${kindLabel}(s) uploaded to sandbox session ${sessionId}: ${notes.join(', ')}. The raw file content was not sent to you directly. Process them in place with sandbox_exec (the container has the usual CLI tooling). sandbox_read_file returns TEXT files only and refuses binaries; to hand a file back to the user use sandbox_create_download_link.]`;
   } catch (e) {
     logger.error(`[sandbox] ${kindLabel} diversion failed, falling back to normal attachment`, e);
     return null;
