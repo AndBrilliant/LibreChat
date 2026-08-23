@@ -1,5 +1,6 @@
 require('events').EventEmitter.defaultMaxListeners = 100;
 const { logger } = require('@librechat/data-schemas');
+const { dreamerCompact } = require('./dreamerCompact');
 const { getBufferString, HumanMessage } = require('@librechat/agents/langchain/messages');
 const {
   createRun,
@@ -1327,6 +1328,44 @@ class AgentClient extends BaseClient {
     promptTokens = promptTokenTotal;
 
     /**
+     * ADR fork: reconstructive compaction (see ./dreamerCompact.js). Runs before
+     * the SDK ever sees the payload. When the full thread would overflow the
+     * model window (or the user pressed "Compact now"), we swap the old turns for
+     * fresh dreamer memory + the recent tail, and disable the SDK summarizer for
+     * this turn (this._dreamerCompacted, honored where summarizationConfig is
+     * resolved). `messages` (the stored thread) is deliberately left whole — only
+     * the model-facing `payload` is compacted, so nothing is lost and the model
+     * can drill back via rehydrate_node / dream_recall / dream_search.
+     */
+    logger.debug(
+      `[dreamerCompact:entry] window=${this.maxContextTokens} promptTokens=${promptTokenTotal} ` +
+        `force=${this.options.forceCompaction} payloadLen=${Array.isArray(payload) ? payload.length : 'n/a'} cid=${this.conversationId}`,
+    );
+    try {
+      const dc = await dreamerCompact({
+        payload,
+        indexTokenCountMap,
+        promptTokenTotal,
+        maxContextTokens: this.maxContextTokens,
+        conversationId: this.conversationId,
+        force: this.options.forceCompaction === true,
+        countFn: (t) => countTokens(t),
+      });
+      if (dc.compacted) {
+        payload = dc.payload;
+        promptTokens = dc.promptTokens;
+        this._dreamerCompacted = true;
+        logger.info(
+          `[dreamerCompact] ${dc.droppedCount} turns -> dreamer memory; ` +
+            `payload=${dc.payload.length} msgs ~${dc.promptTokens} tok ` +
+            `(window ${this.maxContextTokens}, was ${promptTokenTotal} tok)`,
+        );
+      }
+    } catch (err) {
+      logger.warn(`[dreamerCompact] skipped (falling back to SDK path): ${err?.message}`);
+    }
+
+    /**
      * Build shared run context - applies to ALL agents in the run.
      * Request attachment file context is already bound inline to the latest
      * user message above; only side-channel context belongs here.
@@ -2596,11 +2635,18 @@ class AgentClient extends BaseClient {
           /** ADR fork: `resolveSummarizationConfig` returns the configured
            *  block unchanged unless this turn was flagged for on-demand
            *  compaction. The resume path below deliberately does NOT force —
-           *  a checkpoint belongs to the submission that asked for it. */
-          summarizationConfig: resolveSummarizationConfig(
-            appConfig?.summarization,
-            this.options.forceCompaction,
-          ),
+           *  a checkpoint belongs to the submission that asked for it.
+           *
+           *  When reconstructive compaction already ran this turn
+           *  (this._dreamerCompacted), the payload is pre-compacted and fits;
+           *  hand the SDK summarizer a disabled config so it does not window /
+           *  re-summarize on top of it. */
+          summarizationConfig: this._dreamerCompacted
+            ? { ...(appConfig?.summarization || {}), enabled: false }
+            : resolveSummarizationConfig(
+                appConfig?.summarization,
+                this.options.forceCompaction,
+              ),
           appConfig,
           tokenCounter,
           /** Bills subagent child-run model calls — child graphs execute
