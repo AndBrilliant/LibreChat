@@ -46,7 +46,7 @@ import AudioRecorder from './AudioRecorder';
 import CollapseChat from './CollapseChat';
 import QuoteButton from './QuoteButton';
 import StreamAudio from './StreamAudio';
-import TokenUsage from './TokenUsage';
+import DreamerContextGauge from './DreamerContextGauge';
 import StopButton from './StopButton';
 import SendButton from './SendButton';
 import EditBadges from './EditBadges';
@@ -699,7 +699,7 @@ const ChatForm = memo(function ChatForm({
                   }
                 />
                 <div className="mx-auto flex" />
-                <TokenUsage index={index} conversation={conversation} isSubmitting={isSubmitting} />
+                <DreamerContextGauge conversation={conversation} />
                 {SpeechToText && (
                   <AudioRecorder
                     methods={methods}

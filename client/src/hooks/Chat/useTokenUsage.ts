@@ -72,6 +72,32 @@ export interface TokenUsageView {
 }
 
 /**
+ * ADR fork: the active-branch tail for the gauge normally comes from
+ * `useLatestMessageId`, but a passively-restored / imported conversation has no
+ * live branch selection yet, so it returns null and `sumBranch` bails to zero —
+ * blanking the gauge even though the chat is full of restored content. Derive
+ * the leaf from the cached messages (a message that is nobody's parent; for a
+ * linear thread, the latest by createdAt) so `sumBranch` can walk the branch and
+ * sum the stored per-message tokenCounts. Only used as a fallback when the real
+ * tail is absent, so live conversations are unaffected.
+ */
+function findBranchLeaf(messages?: TMessage[] | null): string | null {
+  if (!messages || messages.length === 0) {
+    return null;
+  }
+  const parentIds = new Set(messages.map((m) => m.parentMessageId));
+  const leaves = messages.filter((m) => m.messageId && !parentIds.has(m.messageId));
+  const pool = leaves.length > 0 ? leaves : messages;
+  let latest = pool[0];
+  for (const m of pool) {
+    if ((m.createdAt ?? '') > (latest.createdAt ?? '')) {
+      latest = m;
+    }
+  }
+  return latest?.messageId ?? null;
+}
+
+/**
  * View-model for the context usage indicator. Mount only inside the
  * indicator so its subscriptions never re-render the chat tree.
  */
@@ -156,7 +182,13 @@ export default function useTokenUsage({
       /** Restore each branch's persisted breakdown (Part A) without clobbering
        *  a live finalized snapshot for the same response id. */
       hydrateSnapshots(conversationKey, messages);
-      setBranchTotals(sumBranch(conversationKey, tailIdRef.current, anchorIdRef.current));
+      setBranchTotals(
+        sumBranch(
+          conversationKey,
+          tailIdRef.current ?? findBranchLeaf(messages),
+          anchorIdRef.current,
+        ),
+      );
       setTotalUsage(sumTotalUsage(conversationKey));
     };
 
@@ -199,11 +231,12 @@ export default function useTokenUsage({
      *  only shifts on created/finalize/branch-switch, never per chunk. Usage for
      *  responses whose cache message lacks `metadata.usage` is restored from the
      *  sticky history inside buildIndex. */
-    buildIndex(
+    const cachedForTail = queryClient.getQueryData<TMessage[]>([
+      QueryKeys.messages,
       conversationKey,
-      queryClient.getQueryData<TMessage[]>([QueryKeys.messages, conversationKey]),
-    );
-    setBranchTotals(sumBranch(conversationKey, tailId, anchorId));
+    ]);
+    buildIndex(conversationKey, cachedForTail);
+    setBranchTotals(sumBranch(conversationKey, tailId ?? findBranchLeaf(cachedForTail), anchorId));
     setTotalUsage(sumTotalUsage(conversationKey));
   }, [conversationKey, tailId, anchorId, setBranchTotals, setTotalUsage, queryClient]);
 

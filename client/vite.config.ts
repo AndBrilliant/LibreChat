@@ -91,6 +91,7 @@ export default defineConfig(({ command }) => ({
     VitePWA({
       injectRegister: 'auto', // 'auto' | 'manual' | 'disabled'
       registerType: 'autoUpdate', // 'prompt' | 'autoUpdate'
+      selfDestroying: true, // ADR: kill the PWA service worker — no stale-bundle caching
       devOptions: {
         enabled: false, // disable service worker registration in development mode
       },
