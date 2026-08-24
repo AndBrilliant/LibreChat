@@ -1,18 +1,22 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
+import * as Ariakit from '@ariakit/react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { QueryKeys } from 'librechat-data-provider';
 import type { TMessage, TConversation } from 'librechat-data-provider';
+import { TooltipAnchor } from '@librechat/client';
 import useTokenLimits from '~/hooks/Chat/useTokenLimits';
+import Gauge from './TokenUsage/Gauge';
+import CompactButton from './TokenUsage/CompactButton';
+import { useLocalize } from '~/hooks';
+import { cn } from '~/utils';
 
 /**
- * ADR fork — our own context gauge. The stock TokenUsage indicator derives its
- * number from in-session snapshots / branch usage and blanks out on a passively
- * restored conversation (no live anchor). This one reads the conversation's
- * messages straight from the query cache and sums the stored per-message
- * `tokenCount` along the active branch — the same ground truth the server sends
- * — so it ALWAYS reflects what's actually in the chat, restored or live. Over
- * the window it shows the real percentage (e.g. 172%) in red so a full
- * pre-compaction chat is unmistakable.
+ * ADR fork — context gauge. Same look as the stock indicator (circular gauge +
+ * click-through popover with the breakdown + Compact now), but the NUMBER comes
+ * from summing the conversation's per-message `tokenCount` straight from the
+ * query cache along the active branch — ground truth — instead of the stock
+ * in-session snapshot/branch-usage path, which blanks out on a passively
+ * restored conversation. Restored or live, it shows the real context.
  */
 
 function estTokens(m: TMessage): number {
@@ -33,12 +37,10 @@ function sumBranchTokens(messages: TMessage[] | undefined | null): number {
       byId.set(m.messageId, m);
     }
   }
-  /** leaf = a message that is nobody's parent (the active-branch tail); for a
-   *  linear thread that's simply the latest. Walk up parentMessageId summing. */
   const parentIds = new Set(messages.map((m) => m.parentMessageId));
   const leaves = messages.filter((m) => m.messageId && !parentIds.has(m.messageId));
-  let leaf: TMessage | undefined = leaves[0];
   const pool = leaves.length > 0 ? leaves : messages;
+  let leaf: TMessage | undefined = pool[0];
   for (const m of pool) {
     if (!leaf || (m.createdAt ?? '') > (leaf.createdAt ?? '')) {
       leaf = m;
@@ -64,11 +66,11 @@ export default function DreamerContextGauge({
 }): JSX.Element | null {
   const conversationId = conversation?.conversationId ?? '';
   const queryClient = useQueryClient();
+  const localize = useLocalize();
   const limits = useTokenLimits(conversation);
+  const popover = Ariakit.usePopoverStore({ placement: 'top' });
+  const disclosureRef = useRef<HTMLButtonElement>(null);
 
-  /** Reactive read of the messages cache: `enabled:false` so it never refetches,
-   *  but it still subscribes to this query key, so the gauge re-renders whenever
-   *  messages are (re)loaded into the cache. */
   const { data: messages } = useQuery<TMessage[]>(
     [QueryKeys.messages, conversationId],
     async () => queryClient.getQueryData<TMessage[]>([QueryKeys.messages, conversationId]) ?? [],
@@ -78,36 +80,86 @@ export default function DreamerContextGauge({
   const used = useMemo(() => sumBranchTokens(messages), [messages]);
   const max = limits.maxContextTokens ?? 0;
 
+  /** Hide on an empty/message-less chat, like the stock indicator. */
   if (used <= 0) {
     return null;
   }
 
-  const pct = max > 0 ? Math.round((used / max) * 100) : 0;
-  const over = max > 0 && used > max;
-  const near = !over && pct >= 80;
-  const barColor = over ? 'bg-red-500' : near ? 'bg-amber-500' : 'bg-green-500';
-  const textColor = over ? 'text-red-500' : near ? 'text-amber-600' : 'text-text-secondary';
+  const hasMax = max > 0;
+  const truePct = hasMax ? Math.round((used / max) * 100) : 0; // may exceed 100
+  const gaugePct = hasMax ? Math.min(truePct, 100) : 0; // circle fill, clamped
+  const over = hasMax && truePct > 100;
+  const summary = hasMax ? `${fmt(used)} / ${fmt(max)} (${truePct}%)` : `${fmt(used)}`;
 
   return (
-    <div
-      role="meter"
-      aria-valuemin={0}
-      aria-valuemax={max > 0 ? max : undefined}
-      aria-valuenow={used}
-      title={`Context: ${used.toLocaleString()} / ${(max || 0).toLocaleString()} tokens (${pct}%)${
-        over ? ' — over the model window; will compact on send' : ''
-      }`}
-      className={`flex select-none items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium ${textColor}`}
-    >
-      <span className="relative inline-block h-2 w-16 overflow-hidden rounded-full bg-surface-tertiary">
-        <span
-          className={`absolute left-0 top-0 h-full rounded-full ${barColor}`}
-          style={{ width: `${Math.min(pct, 100)}%` }}
-        />
-      </span>
-      <span className="tabular-nums">
-        {fmt(used)}/{max > 0 ? fmt(max) : '?'} ({pct}%)
-      </span>
-    </div>
+    <>
+      <TooltipAnchor
+        description={summary}
+        side="top"
+        render={
+          <Ariakit.PopoverDisclosure
+            ref={disclosureRef}
+            store={popover}
+            type="button"
+            data-testid="token-usage"
+            aria-label={summary}
+            aria-haspopup="dialog"
+            className={cn(
+              'flex size-9 items-center justify-center rounded-full p-1 transition-colors',
+              'hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              'duration-300 animate-in fade-in zoom-in-95',
+            )}
+          >
+            <span
+              role="meter"
+              aria-valuemin={0}
+              aria-valuemax={hasMax ? max : undefined}
+              aria-valuenow={used}
+              className="flex items-center justify-center"
+            >
+              <Gauge percent={gaugePct} indeterminate={!hasMax} />
+            </span>
+          </Ariakit.PopoverDisclosure>
+        }
+      />
+      <Ariakit.Popover
+        store={popover}
+        gutter={8}
+        portal
+        unmountOnHide
+        finalFocus={disclosureRef}
+        className="z-[200] rounded-xl border border-border-medium bg-surface-secondary p-3 shadow-lg focus:outline-none"
+      >
+        <div className="w-60 space-y-2.5">
+          <div className="flex items-center justify-between text-sm font-medium text-text-primary">
+            <span>{localize('com_ui_context') || 'Context window'}</span>
+            <span className={cn('tabular-nums', over && 'text-red-500')}>
+              {fmt(used)} / {hasMax ? fmt(max) : '?'}
+            </span>
+          </div>
+          <div
+            className="relative h-2 w-full overflow-hidden rounded-full bg-surface-tertiary"
+            role="progressbar"
+            aria-valuenow={truePct}
+          >
+            <span
+              className={cn(
+                'absolute left-0 top-0 h-full rounded-full',
+                over ? 'bg-red-500' : truePct >= 80 ? 'bg-amber-500' : 'bg-green-500',
+              )}
+              style={{ width: `${gaugePct}%` }}
+            />
+          </div>
+          <div className={cn('text-xs', over ? 'text-red-500' : 'text-text-secondary')}>
+            {hasMax
+              ? over
+                ? `${truePct}% — over the window; compacts on your next message`
+                : `${truePct}% of the window`
+              : `${fmt(used)} tokens`}
+          </div>
+          <CompactButton conversationId={conversationId} percent={truePct} />
+        </div>
+      </Ariakit.Popover>
+    </>
   );
 }
