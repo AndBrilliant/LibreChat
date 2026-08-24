@@ -216,6 +216,32 @@ const Summary = memo(({ content, model, provider, tokenCount, summarizing }: Sum
   const [isBarVisible, setIsBarVisible] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const { isSubmitting, isLatestMessage } = useMessageContext();
+  /* ADR: brief visible "Compacting..." countdown so an INSTANT compaction is
+     still perceptible. Runs once, only while this bubble is the active
+     (submitting) latest turn -- never on reload. */
+  const [compactPhase, setCompactPhase] = useState<'counting' | 'done'>(
+    () => (isLatestMessage && isSubmitting ? 'counting' : 'done'),
+  );
+  const compactStartedRef = useRef(compactPhase === 'counting');
+  const [countdown, setCountdown] = useState(2);
+  useEffect(() => {
+    if (compactPhase === 'done' && !compactStartedRef.current && isLatestMessage && isSubmitting) {
+      compactStartedRef.current = true;
+      setCountdown(2);
+      setCompactPhase('counting');
+    }
+  }, [isLatestMessage, isSubmitting, compactPhase]);
+  useEffect(() => {
+    if (compactPhase !== 'counting') {
+      return;
+    }
+    if (countdown <= 0) {
+      setCompactPhase('done');
+      return;
+    }
+    const t = setTimeout(() => setCountdown((c) => c - 1), 900);
+    return () => clearTimeout(t);
+  }, [compactPhase, countdown]);
 
   const text = useMemo(
     () =>
@@ -268,6 +294,24 @@ const Summary = memo(({ content, model, provider, tokenCount, summarizing }: Sum
 
   if (!summarizing && !text) {
     return null;
+  }
+
+  if (compactPhase === 'counting') {
+    return (
+      <div className="group/summary">
+        <div className="mb-2 flex items-center gap-2 rounded-lg bg-surface-tertiary px-3 py-2 text-sm font-medium text-text-primary">
+          <ScrollText className="icon-sm animate-pulse text-amber-500" aria-hidden="true" />
+          <span>Compacting conversation...</span>
+          <span className="ml-auto tabular-nums text-amber-600">{Math.max(countdown, 1)}</span>
+        </div>
+        <div className="mb-4 h-1.5 w-full overflow-hidden rounded-full bg-surface-tertiary">
+          <span
+            className="block h-full rounded-full bg-amber-500 transition-all ease-linear"
+            style={{ width: String(((2 - Math.max(countdown, 0)) / 2) * 100) + '%', transitionDuration: '900ms' }}
+          />
+        </div>
+      </div>
+    );
   }
 
   return (
