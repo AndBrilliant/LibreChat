@@ -212,7 +212,7 @@ const FloatingSummaryBar = memo(
 const Summary = memo(({ content, model, provider, tokenCount, summarizing }: SummaryProps) => {
   const contentId = useId();
   const localize = useLocalize();
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(true);
   const [isBarVisible, setIsBarVisible] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const { isSubmitting, isLatestMessage } = useMessageContext();

@@ -1342,6 +1342,7 @@ class AgentClient extends BaseClient {
         `force=${this.options.forceCompaction} payloadLen=${Array.isArray(payload) ? payload.length : 'n/a'} cid=${this.conversationId}`,
     );
     try {
+      const _compactT0 = Date.now();
       const dc = await dreamerCompact({
         payload,
         indexTokenCountMap,
@@ -1351,12 +1352,46 @@ class AgentClient extends BaseClient {
         force: this.options.forceCompaction === true,
         countFn: (t) => countTokens(t),
       });
+      const _compactMs = Date.now() - _compactT0;
       if (dc.compacted) {
         payload = dc.payload;
         promptTokens = dc.promptTokens;
         this._dreamerCompacted = true;
+        /**
+         * Make the compaction VISIBLE + expandable in the UI. The SDK path
+         * normally emits ON_SUMMARIZE_* events that `aggregateContent` turns
+         * into a `summary` content part; since we compacted ourselves, we build
+         * that same part directly on the response so `Summary.tsx` renders the
+         * "Conversation summarized" bubble (click to expand the injected memory).
+         * Pushed while `contentParts` is still empty this turn, so it lands at
+         * index 0 (above the answer) and streamed text appends after it.
+         */
+        if (Array.isArray(this.contentParts)) {
+          const statsHeader =
+            `⏱ **Reconstructive compaction** — folded ${dc.droppedCount} older message(s) ` +
+            `in ${_compactMs} ms · kept the last ${dc.floorTurns} turns verbatim ` +
+            `(${dc.retainedVerbatim} msgs) · dreamer memory ≈ ${dc.metaTokens} tokens`;
+          /**
+           * Render the compaction as a raw, always-visible text block (not a
+           * collapsible summary part) so EVERYTHING the model was given is on
+           * screen with no click and no dependency on the client bundle / PWA
+           * cache. This is display-only; the model receives `dc.meta` via the
+           * injected system message in `payload`, independent of this block.
+           */
+          this.contentParts.push({
+            type: ContentTypes.TEXT,
+            text:
+              '\n\n---\n\n' +
+              statsHeader +
+              '\n\n> Below is the exact reconstructive memory injected in place of the ' +
+              'older turns (the model also keeps the last turns verbatim, above).\n\n' +
+              dc.meta +
+              '\n\n---\n\n',
+          });
+        }
         logger.info(
-          `[dreamerCompact] ${dc.droppedCount} turns -> dreamer memory; ` +
+          `[dreamerCompact] dropped ${dc.droppedCount} old msgs -> dreamer memory; ` +
+            `kept ${dc.retainedVerbatim} verbatim (floor: last ${dc.floorTurns} turns / ${dc.floorMessages} msgs); ` +
             `payload=${dc.payload.length} msgs ~${dc.promptTokens} tok ` +
             `(window ${this.maxContextTokens}, was ${promptTokenTotal} tok)`,
         );

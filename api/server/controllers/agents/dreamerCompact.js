@@ -118,13 +118,36 @@ async function dreamerCompact({
    *  headroom for the response + tool/instruction overhead. */
   const tailBudget = (force ? Math.floor(window * 0.25) : Math.floor(window * 0.75)) - metaTokens;
 
-  /** Walk newest -> oldest, keeping turns until the tail budget is spent. The
-   *  very last message (the current turn) is always kept, even if it is huge. */
+  /** Hard floor: always keep the last `RETAIN_TURNS` full turns verbatim,
+   *  regardless of budget, so the model always has the exact recent exchange
+   *  (not just a summary of it). A "turn" starts at a user message; we walk
+   *  back until we've passed RETAIN_TURNS user messages. Falls back to a
+   *  message-count floor if roles aren't present on the formatted payload. */
+  const RETAIN_TURNS = 3;
+  let usersSeen = 0;
+  let floorStart = payload.length - 1;
+  for (let i = payload.length - 1; i >= 0; i--) {
+    floorStart = i;
+    if (payload[i] && payload[i].role === 'user') {
+      usersSeen += 1;
+      if (usersSeen >= RETAIN_TURNS) {
+        break;
+      }
+    }
+  }
+  if (usersSeen === 0) {
+    /** roles unavailable — keep the last 4 messages (~2 simple turns) */
+    floorStart = Math.max(0, payload.length - 4);
+  }
+
+  /** Walk newest -> oldest. Everything at/after `floorStart` is force-kept
+   *  (the retained-turns floor); older messages are kept until the tail budget
+   *  is spent. */
   const keep = [];
   let used = 0;
   for (let i = payload.length - 1; i >= 0; i--) {
     const tok = Number(indexTokenCountMap[i]) || 0;
-    if (i === payload.length - 1 || used + tok <= tailBudget) {
+    if (i >= floorStart || used + tok <= tailBudget) {
       keep.push({ idx: i, tok });
       used += tok;
     } else {
@@ -161,6 +184,11 @@ async function dreamerCompact({
     payload: newPayload,
     promptTokens: metaTokens + used,
     droppedCount: payload.length - keep.length,
+    retainedVerbatim: keep.length,
+    floorMessages: payload.length - floorStart,
+    floorTurns: usersSeen,
+    meta,
+    metaTokens,
   };
 }
 
