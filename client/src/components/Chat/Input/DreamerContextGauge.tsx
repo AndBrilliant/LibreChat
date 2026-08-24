@@ -51,6 +51,18 @@ function sumBranchTokens(messages: TMessage[] | undefined | null): number {
   let guard = 0;
   while (cur && guard++ < 20000) {
     sum += estTokens(cur);
+    /* A compaction checkpoint (summary content block) STANDS IN for every older
+       turn: add the summary's own tokens and stop. This is what makes the gauge
+       drop after a compaction (full -> cleared) instead of re-counting the
+       compacted history that still lives in the DB. */
+    const summaryPart = Array.isArray(cur.content)
+      ? cur.content.find((p: any) => p && p.type === 'summary')
+      : undefined;
+    if (summaryPart) {
+      const st = (summaryPart as any).tokenCount;
+      sum += typeof st === 'number' && st > 0 ? st : 0;
+      break;
+    }
     cur = cur.parentMessageId ? byId.get(cur.parentMessageId) : undefined;
   }
   return sum;

@@ -86,9 +86,8 @@ async function dreamerCompact({
 
   /** Auto-compact once the full thread crosses 85% of the window; "Compact now"
    *  lowers the bar to "there is meaningfully more here than a fresh chat". */
-  const needed = force
-    ? promptTokenTotal > Math.floor(window * 0.2)
-    : promptTokenTotal > Math.floor(window * 0.85);
+  /* ADR: Compact now (force) ALWAYS compacts, whatever the model window. */
+  const needed = force ? true : promptTokenTotal > Math.floor(window * 0.85);
   if (!needed) {
     return { compacted: false };
   }
@@ -116,7 +115,7 @@ async function dreamerCompact({
   /** How much recent tail to keep verbatim. Force keeps a tight recent window;
    *  auto keeps up to ~75% of the model window. The remaining share is left as
    *  headroom for the response + tool/instruction overhead. */
-  const tailBudget = (force ? Math.floor(window * 0.25) : Math.floor(window * 0.75)) - metaTokens;
+  const tailBudget = force ? 0 : Math.floor(window * 0.75) - metaTokens;
 
   /** Hard floor: always keep the last `RETAIN_TURNS` full turns verbatim,
    *  regardless of budget, so the model always has the exact recent exchange

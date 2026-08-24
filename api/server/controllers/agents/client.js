@@ -1372,21 +1372,20 @@ class AgentClient extends BaseClient {
             `in ${_compactMs} ms · kept the last ${dc.floorTurns} turns verbatim ` +
             `(${dc.retainedVerbatim} msgs) · dreamer memory ≈ ${dc.metaTokens} tokens`;
           /**
-           * Render the compaction as a raw, always-visible text block (not a
-           * collapsible summary part) so EVERYTHING the model was given is on
-           * screen with no click and no dependency on the client bundle / PWA
-           * cache. This is display-only; the model receives `dc.meta` via the
-           * injected system message in `payload`, independent of this block.
+           * Persist an EXPANDABLE "Conversation summarized" bubble (Summary.tsx):
+           * the compaction shows in the thread and the full reconstructive memory
+           * expands on click. The model receives `dc.meta` via the injected
+           * system message in `payload`, independent of this display block.
            */
           this.contentParts.push({
-            type: ContentTypes.TEXT,
-            text:
-              '\n\n---\n\n' +
-              statsHeader +
-              '\n\n> Below is the exact reconstructive memory injected in place of the ' +
-              'older turns (the model also keeps the last turns verbatim, above).\n\n' +
-              dc.meta +
-              '\n\n---\n\n',
+            type: ContentTypes.SUMMARY,
+            content: [{ type: ContentTypes.TEXT, text: statsHeader + dc.meta }],
+            tokenCount: dc.metaTokens,
+            provider: 'dreamerCompress',
+            model: 'adr-dreamer-compress',
+            summarizing: false,
+            summaryVersion: 1,
+            createdAt: new Date().toISOString(),
           });
         }
         logger.info(
