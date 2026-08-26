@@ -23,7 +23,7 @@ const { logger } = require('@librechat/data-schemas');
 
 const DREAMER_URL =
   process.env.DREAMER_COMPRESS_URL || 'http://host.docker.internal:8095/v1/chat/completions';
-const DREAMER_TIMEOUT_MS = Number(process.env.DREAMER_COMPRESS_TIMEOUT_MS) || 15000;
+const DREAMER_TIMEOUT_MS = Number(process.env.DREAMER_COMPRESS_TIMEOUT_MS) || 600000; // ADR: sync catch-up fold can take minutes; wait for a COMPLETE summary (was 15000)
 
 /** Ask the dreamer for this conversation's compressed memory. The
  *  X-Conversation-Id header is the one-line "fork patch" that was missing —
