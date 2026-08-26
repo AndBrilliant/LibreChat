@@ -1380,7 +1380,12 @@ class AgentClient extends BaseClient {
           this.contentParts.push({
             type: ContentTypes.SUMMARY,
             content: [{ type: ContentTypes.TEXT, text: statsHeader + dc.meta }],
-            tokenCount: dc.metaTokens,
+            /* ADR: the gauge reads this summary part's tokenCount as the size of
+             * everything the checkpoint stands in for. That is the FULL compacted
+             * prompt actually sent (meta + retained verbatim tail = dc.promptTokens),
+             * NOT just the meta summary. Using metaTokens here made the gauge miss
+             * the entire retained tail and read ~3K instead of the real ~40-180K. */
+            tokenCount: dc.promptTokens,
             provider: 'dreamerCompress',
             model: 'adr-dreamer-compress',
             summarizing: false,
@@ -2320,6 +2325,102 @@ class AgentClient extends BaseClient {
         abortController = new AbortController();
       }
 
+      /* ADR fork: repeat-loop guard. Some models (seen on Kimi K3) degenerate
+       * into emitting the same block verbatim over and over. Detect a >=3x
+       * back-to-back verbatim repetition in the streamed text and abort the
+       * upstream generation, which closes the socket to the provider and stops
+       * token billing. Conservative thresholds avoid cutting legitimate text. */
+      const _repeatGuard = { lastLen: 0, tripped: false };
+      const _detectRepeatLoop = (text) => {
+        /* Adaptive period detection (no fixed unit size): take a short anchor
+         * from the tail, find its PREVIOUS occurrence to measure the repeat
+         * PERIOD, then expand to a full period-length block and count how many
+         * times it repeats back-to-back at the tail. Catches loops of any block
+         * length (short chants or ~750-char paragraphs alike). */
+        if (typeof text !== "string" || text.length < 600) return false;
+        const win = text.slice(-16000);
+        const trimmed = win.replace(/\s+$/, "");
+        const end = trimmed.length;
+        const anchorLen = 40;
+        if (end < anchorLen * 2) return false;
+        const anchor = trimmed.slice(end - anchorLen, end);
+        if (anchor.trim().length < 16) return false;
+        // where did this tail last appear before now? distance = repeat period
+        const prev = trimmed.lastIndexOf(anchor, end - anchorLen - 1);
+        if (prev < 0) return false;
+        const period = (end - anchorLen) - prev;
+        if (period < 12 || period > 8000) return false;
+        // expand to the full repeating unit and count exact back-to-back reps
+        const unit = trimmed.slice(end - period, end);
+        let reps = 1, pos = end - period;
+        while (pos - period >= 0 && trimmed.slice(pos - period, pos) === unit) {
+          reps++; pos -= period;
+        }
+        // >=3 reps AND a substantial repeated span (guards against short legit echoes)
+        return reps >= 3 && reps * period >= 200;
+      };
+      const runRepeatGuard = () => {
+        try {
+          if (_repeatGuard.tripped || abortController.signal.aborted) return;
+          const parts = this.contentParts;
+          if (!Array.isArray(parts)) return;
+          let text = "";
+          for (const p of parts) {
+            if (p && p.type === ContentTypes.TEXT) {
+              const t = typeof p.text === "string" ? p.text : p[ContentTypes.TEXT];
+              if (typeof t === "string") text += t;
+            }
+          }
+          if (text.length - _repeatGuard.lastLen < 200) return;
+          _repeatGuard.lastLen = text.length;
+          if (text.length > 1500) logger.debug("[repeatGuard] streaming textlen=" + text.length);
+          if (!_detectRepeatLoop(text)) return;
+          _repeatGuard.tripped = true;
+          try {
+            for (let i = parts.length - 1; i >= 0; i--) {
+              const p = parts[i];
+              if (p && p.type === ContentTypes.TEXT) {
+                const note = "\n\n[repeat-guard: the model was looping; generation was cut here to stop token usage.]";
+                if (typeof p.text === "string") p.text += note;
+                else if (typeof p[ContentTypes.TEXT] === "string") p[ContentTypes.TEXT] += note;
+                break;
+              }
+            }
+          } catch (e) { /* note is best-effort */ }
+          logger.warn("[repeatGuard] repetition loop detected -> aborting to stop token usage");
+          try { abortController.abort(); } catch (e) {}
+        } catch (e) { /* guard must never break streaming */ }
+      };
+      const wrapHandlersWithRepeatGuard = (handlers) => {
+        try {
+          if (!handlers || typeof handlers !== "object") return handlers;
+          const out = Array.isArray(handlers) ? [] : {};
+          for (const key of Reflect.ownKeys(handlers)) {
+            const h = handlers[key];
+            if (h && typeof h.handle === "function") {
+              const origHandle = h.handle;
+              out[key] = new Proxy(h, {
+                get(target, prop, recv) {
+                  if (prop === "handle") {
+                    return async (...args) => {
+                      const r = await origHandle.apply(target, args);
+                      runRepeatGuard();
+                      return r;
+                    };
+                  }
+                  return Reflect.get(target, prop, recv);
+                },
+              });
+            } else {
+              out[key] = h;
+            }
+          }
+          return out;
+        } catch (e) {
+          return handlers; // never break streaming
+        }
+      };
+
       /** Fire-and-forget: boot the per-conversation stateful sandbox in
        *  parallel with generation so the first execute_code/bash call lands
        *  on a warm VM. No-op unless a reachable agent resolved
@@ -2659,9 +2760,11 @@ class AgentClient extends BaseClient {
           calibrationRatio,
           runId: this.responseMessageId,
           signal: abortController.signal,
-          customHandlers: createSteerIndexOffsetHandlers(
-            this.options.eventHandlers,
-            this.steerOffsetState,
+          customHandlers: wrapHandlersWithRepeatGuard(
+            createSteerIndexOffsetHandlers(
+              this.options.eventHandlers,
+              this.steerOffsetState,
+            ),
           ),
           requestBody: config.configurable.requestBody,
           user: createSafeUser(this.options.req?.user),

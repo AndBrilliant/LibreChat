@@ -115,7 +115,11 @@ async function dreamerCompact({
   /** How much recent tail to keep verbatim. Force keeps a tight recent window;
    *  auto keeps up to ~75% of the model window. The remaining share is left as
    *  headroom for the response + tool/instruction overhead. */
-  const tailBudget = force ? 0 : Math.floor(window * 0.75) - metaTokens;
+  /* ADR: aggressive compression. The reconstructive meta summary carries the
+   * older context, so we keep only a small verbatim tail (~15% of window) on
+   * top of the hard RETAIN_TURNS floor. Was 0.75, which barely compressed. */
+  const TAIL_FRACTION = 0.15;
+  const tailBudget = force ? 0 : Math.floor(window * TAIL_FRACTION) - metaTokens;
 
   /** Hard floor: always keep the last `RETAIN_TURNS` full turns verbatim,
    *  regardless of budget, so the model always has the exact recent exchange
