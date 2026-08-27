@@ -104,6 +104,11 @@ const configureGenerationStreams = () => {
 };
 
 const startServer = async () => {
+  /** Absorbs provider turns that announce work and then stop without calling
+   *  a tool (see api/server/patches/agentAutoContinue.js). Installed before
+   *  any graph is built so the first request is already covered. */
+  require('./patches/agentAutoContinue').install();
+
   const { metricsMiddleware, metricsRouter } = createMetrics();
   if (!process.env.METRICS_SECRET) {
     logger.warn('[metrics] METRICS_SECRET is not set - /metrics will return 401 for all requests');
@@ -281,6 +286,7 @@ const startServer = async () => {
   app.use('/api/user', routes.user);
   app.use('/api/search', routes.search);
   app.use('/api/messages', routes.messages);
+  app.use('/api/dreamer/compact-now', require('./routes/dreamerCompactNow'));
   app.use('/api/convos', routes.convos);
   app.use('/api/presets', routes.presets);
   app.use('/api/projects', routes.projects);

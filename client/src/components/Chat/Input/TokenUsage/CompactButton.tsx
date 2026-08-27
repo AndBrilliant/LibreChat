@@ -1,62 +1,82 @@
-import { memo, useCallback } from 'react';
-import { useRecoilState } from 'recoil';
-import { Constants } from 'librechat-data-provider';
+import { memo, useCallback, useState } from 'react';
+import axios from 'axios';
+import { useQueryClient } from '@tanstack/react-query';
+import { Constants, QueryKeys } from 'librechat-data-provider';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
-import store from '~/store';
 
 /**
- * ADR fork — arms an on-demand context checkpoint for the next message.
+ * ADR fork — "Compact now" fires an IMMEDIATE, on-click compaction.
  *
- * Lives in the token-usage popover because that is where the decision gets
- * made: you are already looking at the meter when you decide to compact.
- *
- * The compaction floor is not cosmetic. Forcing works by shrinking the run's
- * budget so pruning overflows (see `compaction.ts`); a conversation using less
- * than the forced budget has nothing to prune, so the request would be a
- * silent no-op. Better to say so than to accept a click that does nothing.
+ * Posts to POST /api/dreamer/compact-now, which asks the dreamer for this
+ * conversation's compressed memory and persists a `summary` checkpoint after
+ * the current leaf. The gauge + client.js already treat that summary part as
+ * "stands in for every older turn", so the context drops the instant we refetch
+ * the thread — no waiting for a turn. The full thread stays in the store; the
+ * model drills back via rehydrate_node / dream_recall / dream_search later.
  */
-const COMPACTION_FLOOR_PERCENT = 25;
-
 function CompactButton({
   conversationId,
-  percent,
+  percent: _percent,
 }: {
   conversationId?: string | null;
   percent: number;
 }) {
   const localize = useLocalize();
-  const convoKey = conversationId ?? Constants.NEW_CONVO;
-  const [armed, setArmed] = useRecoilState(store.pendingCompactionByConvoId(convoKey));
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const available = percent >= COMPACTION_FLOOR_PERCENT;
+  const disabled =
+    !conversationId || conversationId === Constants.NEW_CONVO || busy;
 
-  const toggle = useCallback(() => setArmed((prev) => !prev), [setArmed]);
+  const compactNow = useCallback(async () => {
+    if (disabled || !conversationId) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await axios.post('/api/dreamer/compact-now', { conversationId });
+      // refetch the thread so the checkpoint appears and the gauge drops now
+      await queryClient.invalidateQueries({
+        queryKey: [QueryKeys.messages, conversationId],
+      });
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: string } }; message?: string };
+      setError(err?.response?.data?.error || err?.message || 'compaction failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [disabled, conversationId, queryClient]);
 
-  const armedHintKey = armed
-    ? 'com_ui_compact_context_armed'
-    : 'com_ui_compact_context_description';
-  const hintKey = available ? armedHintKey : 'com_ui_compact_context_unavailable';
+  const label = busy
+    ? localize('com_ui_compact_context_working') || 'Compacting…'
+    : localize('com_ui_compact_context') || 'Compact now';
 
   return (
     <div className="space-y-1.5">
       <button
         type="button"
-        onClick={toggle}
-        disabled={!available}
-        aria-pressed={armed}
+        onClick={compactNow}
+        disabled={disabled}
+        aria-busy={busy}
         data-testid="compact-context"
         className={cn(
           'w-full rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
           'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-          available
-            ? 'bg-surface-tertiary text-text-primary hover:bg-surface-hover'
-            : 'cursor-not-allowed bg-surface-tertiary text-text-secondary opacity-60',
+          'bg-surface-tertiary text-text-primary hover:bg-surface-hover',
+          disabled ? 'opacity-60' : '',
         )}
       >
-        {armed ? localize('com_ui_compact_context_cancel') : localize('com_ui_compact_context')}
+        {label}
       </button>
-      <p className="text-xs text-text-secondary">{localize(hintKey)}</p>
+      <p className={cn('text-xs', error ? 'text-red-500' : 'text-text-secondary')}>
+        {error
+          ? error
+          : localize('com_ui_compact_context_description') ||
+            'Fold the earlier turns into memory now.'}
+      </p>
     </div>
   );
 }
