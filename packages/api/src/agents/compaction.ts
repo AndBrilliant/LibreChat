@@ -30,7 +30,7 @@ import type { SummarizationConfig } from 'librechat-data-provider';
 /** Reserved share of the window during a forced run, leaving ~25% as the
  *  pruning budget: high enough that an ordinary working conversation
  *  overflows, low enough that the post-checkpoint retry still fits. */
-export const FORCED_COMPACTION_RESERVE_RATIO = 0.75;
+export const FORCED_COMPACTION_RESERVE_RATIO = 0.5;
 
 /** Turns kept verbatim through a forced compaction. Applied only when the
  *  deployment has not configured its own `summarization.retainRecent`. */

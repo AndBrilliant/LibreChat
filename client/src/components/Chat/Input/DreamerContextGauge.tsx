@@ -169,7 +169,7 @@ export default function DreamerContextGauge({
                 : `${truePct}% of the window`
               : `${fmt(used)} tokens`}
           </div>
-          <CompactButton conversationId={conversationId} percent={truePct} />
+          <CompactButton conversationId={conversationId} percent={truePct} used={used} />
         </div>
       </Ariakit.Popover>
     </>

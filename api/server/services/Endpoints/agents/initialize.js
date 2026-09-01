@@ -297,6 +297,16 @@ const initializeClient = async ({
         jobCreatedAt,
       });
 
+      /** `end_turn` is bound to every tool-using agent by the turn-protocol
+       *  guard, so it must also be executable here or the model's sign-off
+       *  comes back as `Tool "end_turn" not found`. */
+      if (Array.isArray(result?.loadedTools) && !result.loadedTools.some((t) => t?.name === 'end_turn')) {
+        const endTurn = require('~/server/patches/agentAutoContinue').getEndTurnExecutor();
+        if (endTurn != null) {
+          result.loadedTools.push(endTurn);
+        }
+      }
+
       logger.debug(`[ON_TOOL_EXECUTE] loaded ${result.loadedTools?.length ?? 0} tools`);
       /** Per-agent narrowed flag (admin capability AND agent.tools
        *  includes execute_code), captured in `agentToolContexts` when

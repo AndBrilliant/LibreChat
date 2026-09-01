@@ -1560,8 +1560,9 @@
   "com_ui_permissions_failed_update": "Failed to update permissions. Please try again.",
   "com_ui_permissions_updated_success": "Permissions updated successfully",
   "com_ui_compact_context": "Compact now",
-  "com_ui_compact_context_armed": "Checkpoint queued — it runs with your next message",
-  "com_ui_compact_context_cancel": "Cancel checkpoint",
+  "com_ui_compact_context_belowfloor": "Below the recommended threshold — there may be little to summarize, but you can compact anyway.",
+  "com_ui_compact_context_armed": "(removed — compaction is now instant)",
+  "com_ui_compact_context_cancel": "(removed — compaction is now instant)",
   "com_ui_compact_context_description": "Summarize the conversation so far into a checkpoint, on your next message.",
   "com_ui_compact_context_unavailable": "Not enough context to compact yet — there is nothing to summarize.",
   "com_ui_persistent_context": "Always",
@@ -2156,5 +2157,6 @@
   "com_ui_zoom_in": "Zoom in",
   "com_ui_zoom_level": "Zoom level",
   "com_ui_zoom_out": "Zoom out",
-  "com_user_message": "You"
+  "com_user_message": "You",
+  "com_ui_compact_context_working": "Compacting now…"
 }

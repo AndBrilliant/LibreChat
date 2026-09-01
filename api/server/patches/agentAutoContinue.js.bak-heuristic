@@ -1,0 +1,369 @@
+/**
+ * Auto-continue guard for stalled agent turns.
+ *
+ * Kimi K3 on api.kimi.com/coding/v1 returns `finish_reason: "stop"` with zero
+ * tool calls in roughly one turn out of five, right after announcing an action
+ * it never takes ("Now let me get the numbers. Fetching PDG 2026."). The graph
+ * ends on any assistant message without tool calls, so that announcement
+ * becomes the whole turn and the user sees the conversation stop dead. The
+ * model, asked why, invents a cause ("something is truncating me") because it
+ * has no view of its own harness.
+ *
+ * Measured against the real 191k-token conversation state that triggered it,
+ * 20 trials per condition: 4/20 stalls at temperature 1 / reasoning_effort
+ * high. There is no config lever — Kimi rejects any other temperature with
+ * `invalid temperature: only 1 is allowed for this model`, so the stall cannot
+ * be tuned away and has to be absorbed here.
+ *
+ * Each retry is an independent draw against the same ~80% success rate, so
+ * retrying is overwhelmingly likely to succeed within a few attempts. By
+ * explicit instruction there is NO retry cap: a turn that announced work and
+ * did not do it gets re-invoked until it either does the work or ends the turn
+ * cleanly. The only ceiling is the graph's own `recursionLimit`
+ * (`endpoints.agents.recursionLimit` in librechat.yaml), which is the backstop
+ * against a genuinely wedged run. Set `AGENT_AUTOCONTINUE_MAX_STALLS` to a
+ * positive integer to reimpose a cap.
+ *
+ * Two hooks, in order of preference:
+ *
+ *   1. `StandardGraph.prototype.createCallModel` — wraps the agent node, so a
+ *      stalled turn gets a corrective message APPENDED to graph state naming
+ *      what went wrong, then re-enters the agent node via the graph's own
+ *      `pendingPreemptReturn` set (the same re-entry the preempt/injection
+ *      path uses). The model is told why it is running again instead of
+ *      silently seeing its own last message.
+ *   2. `toolsCondition` — an edge, so it cannot add messages. Kept as a
+ *      fallback that still re-routes to the agent node if (1) fails to
+ *      install. When (1) works, `routeMessage` returns early on
+ *      `pendingPreemptReturn` and never reaches this one.
+ *
+ * Hook point: the compiled graph calls `require_ToolNode.toolsCondition(...)`,
+ * a property read at call time, so wrapping the export is enough — no
+ * patching of compiled output, and it survives `npm install`. The wrapper only
+ * ever converts an END verdict into a return to the agent node; every other
+ * verdict is passed through untouched.
+ */
+const { logger } = require('@librechat/data-schemas');
+
+/** Graph node key prefixes (GraphNodeKeys in @librechat/agents). */
+const TOOLS_PREFIX = 'tools=';
+const AGENT_PREFIX = 'agent=';
+
+/**
+ * Consecutive tool-less assistant turns to allow before giving up. 0 means
+ * unlimited, which is the default: the graph `recursionLimit` is the ceiling.
+ */
+const MAX_CONSECUTIVE_STALLS = Number(process.env.AGENT_AUTOCONTINUE_MAX_STALLS ?? 0) || 0;
+
+/** Only the tail of the message is inspected — the announcement lives there. */
+const TAIL_CHARS = 400;
+
+/**
+ * An announcement is a first-person commitment to act, not any sentence that
+ * happens to contain an action verb. "That's a computation, not a literature
+ * review" and "I'll be here when it clicks" are prose about work, not promises
+ * of it, so the pattern anchors on commitment phrases at a clause boundary and
+ * carves out the hand-back forms ("let me know", "I'll wait").
+ */
+const COMMIT =
+  /(?:^|[.;!?]["'`*_)\]]*\s+|\n+|,\s*(?:so|then|and)\s+|\s+so\s+|[—-]\s*)(?:now\s+|ok(?:ay)?[,.]?\s+|alright[,.]?\s+|right[,.]?\s+)?(?:let(?:'s|s| us| me)(?!\s+(?:know|be|say|put|think|start with)\b)|lemme|i'?ll(?!\s+(?:be|wait|leave|stay|stop|hold)\b)|i will(?!\s+(?:be|wait|leave|stay|stop|hold)\b)|i'?m going to|i am going to|about to\s|hold on|one (?:sec|second|moment)|stand ?by|on it\b)/i;
+
+/** Bare gerund announcements: "Fetching PDG 2026.", "Doing both." */
+const GERUND =
+  /(?:^|[.;!?]["'`*_)\]]*\s+|\n+)(?:fetching|pulling|running|checking|searching|querying|grabbing|computing|calculating|installing|loading|getting|doing (?:both|that|it|this))\b/i;
+
+const INTENT = { test: (text) => COMMIT.test(text) || GERUND.test(text) };
+
+/**
+ * True when the assistant handed the turn back on purpose: a trailing question
+ * is a request for input, not a stall.
+ */
+function endsWithQuestion(text) {
+  return /\?["'`*_)\]]*\s*$/.test(text);
+}
+
+/**
+ * The provider's own verdict on why generation ended. Reaches the message as
+ * `generationInfo.finish_reason` -> `response_metadata` (see
+ * `@librechat/agents` llm/openai/index.ts). LibreChat itself discards this —
+ * every stored message shows no finish_reason — so it has never been available
+ * for diagnosis until now.
+ *
+ * 'length'      = the provider truncated the output at max_tokens. CERTAIN.
+ * 'tool_calls'  = the model wants tools; never a stall.
+ * 'stop'        = the model ended its turn. Ambiguous: a real answer and a
+ *                 stall are indistinguishable here, which is why the
+ *                 announcement heuristic exists.
+ */
+function finishReason(message) {
+  return (
+    message?.response_metadata?.finish_reason ??
+    message?.additional_kwargs?.finish_reason ??
+    undefined
+  );
+}
+
+function messageText(message) {
+  if (message == null) {
+    return '';
+  }
+  const { content } = message;
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === 'string' ? part : part?.type === 'text' ? (part.text ?? '') : '',
+      )
+      .join('');
+  }
+  return '';
+}
+
+function isAssistant(message) {
+  if (message == null) {
+    return false;
+  }
+  const type = typeof message._getType === 'function' ? message._getType() : undefined;
+  return type === 'ai' || message.role === 'assistant';
+}
+
+function hasToolCalls(message) {
+  return (message?.tool_calls?.length ?? 0) > 0;
+}
+
+/** Consecutive tool-less assistant messages at the tail, newest first. */
+function countTrailingStalls(messages) {
+  let count = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!isAssistant(message) || hasToolCalls(message)) {
+      break;
+    }
+    count++;
+  }
+  return count;
+}
+
+/** How many corrections this run has already injected. */
+function countCorrections(messages) {
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+  let count = 0;
+  for (const message of messages) {
+    if (message?.additional_kwargs?.__autoContinueCorrection === true) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function shouldRetry(messages) {
+  const last = messages[messages.length - 1];
+  if (!isAssistant(last) || hasToolCalls(last)) {
+    return false;
+  }
+  const reason = finishReason(last);
+  /**
+   * Hard truncation. No heuristic required and no judgement call: the provider
+   * says it cut the output off mid-generation, so the turn is provably
+   * incomplete and always worth continuing, question mark or not.
+   */
+  if (reason === 'length') {
+    return true;
+  }
+  const text = messageText(last).trim();
+  /** An empty turn is a different failure (abort, provider error) — not ours. */
+  if (text.length === 0) {
+    return false;
+  }
+  if (endsWithQuestion(text)) {
+    return false;
+  }
+  if (!INTENT.test(text.slice(-TAIL_CHARS))) {
+    return false;
+  }
+  if (MAX_CONSECUTIVE_STALLS > 0) {
+    return countTrailingStalls(messages) < MAX_CONSECUTIVE_STALLS;
+  }
+  return true;
+}
+
+/** What the model is told when its turn is re-run. */
+function buildCorrection(text, reason) {
+  const quoted = text.trim().slice(-220);
+  if (reason === 'length') {
+    return (
+      'AUTOMATED HARNESS NOTICE — not from the user.\n\n' +
+      'Your previous turn was CUT OFF mid-generation by the provider ' +
+      '(finish_reason=length): you hit the max_tokens ceiling. Your output ' +
+      'ended here:\n\n"' +
+      quoted +
+      '"\n\nThe user saw only that fragment. Continue from exactly where you ' +
+      'stopped. Do not restart, do not re-summarise what you already wrote.'
+    );
+  }
+  return (
+    'AUTOMATED HARNESS NOTICE — not from the user.\n\n' +
+    'Your previous turn ended WITHOUT emitting a single tool call, but its text ' +
+    'announced work you were about to do:\n\n"' +
+    quoted +
+    '"\n\nNo tool ran. No results came back. Nothing you described actually ' +
+    'happened, and the user saw only the announcement. This is a known ' +
+    'provider-side stall, not something you did wrong, and the harness has ' +
+    're-run you automatically.\n\n' +
+    'Do it now: emit the tool calls themselves in this turn. Do not restate ' +
+    'the plan, do not apologize, and do not describe what you are about to do. ' +
+    'If you genuinely need no tools, answer the question directly instead.'
+  );
+}
+
+/**
+ * Wraps the agent node so a stalled turn is corrected in-band. Returns false
+ * when the graph internals have moved and the wrap cannot be applied, leaving
+ * the `toolsCondition` fallback in charge.
+ */
+function installNodeHook() {
+  let StandardGraph;
+  let HumanMessage;
+  try {
+    const path = require('path');
+    const agentsDir = path.dirname(require.resolve('@librechat/agents'));
+    ({ StandardGraph } = require(path.join(agentsDir, 'graphs', 'Graph.cjs')));
+    ({ HumanMessage } = require('@langchain/core/messages'));
+  } catch (error) {
+    logger.error('[agentAutoContinue] graph internals not resolvable, correction hook OFF', error);
+    return false;
+  }
+  if (typeof StandardGraph?.prototype?.createCallModel !== 'function') {
+    logger.error('[agentAutoContinue] createCallModel missing, correction hook OFF');
+    return false;
+  }
+  if (StandardGraph.prototype.createCallModel.__autoContinueWrapped === true) {
+    return true;
+  }
+
+  const original = StandardGraph.prototype.createCallModel;
+
+  function createCallModel(agentId) {
+    const node = original.call(this, agentId);
+    const graph = this;
+    return async function callModelWithStallCorrection(state, config) {
+      const result = await node.call(this, state, config);
+      const produced = result?.messages;
+      if (!Array.isArray(produced) || produced.length === 0) {
+        return result;
+      }
+      /** Only the model's own output is examined, never prior turns. */
+      if (!shouldRetry(produced)) {
+        return result;
+      }
+      /** Re-entry uses the graph's existing self-loop; see routeMessage. */
+      if (graph.pendingPreemptReturn == null) {
+        return result;
+      }
+      /** `produced` holds only this call's output, so the cap is counted
+       *  against corrections already in graph state for this run. */
+      if (
+        MAX_CONSECUTIVE_STALLS > 0 &&
+        countCorrections(state?.messages) >= MAX_CONSECUTIVE_STALLS
+      ) {
+        logger.warn(
+          `[agentAutoContinue] stall cap ${MAX_CONSECUTIVE_STALLS} reached for ${agentId}; letting the turn end`,
+        );
+        return result;
+      }
+      const last = produced[produced.length - 1];
+      const reason = finishReason(last) ?? 'none';
+      graph.pendingPreemptReturn.add(agentId);
+      logger.info(
+        `[agentAutoContinue] ${reason === 'length' ? 'TRUNCATED (finish_reason=length)' : 'stall'} corrected + re-invoked | finish_reason=${reason} corrections=${countCorrections(state?.messages) + 1} cap=${MAX_CONSECUTIVE_STALLS || 'none'} agent=${agentId}`,
+      );
+      const correction = new HumanMessage(buildCorrection(messageText(last), reason));
+      /** Tagged so `countCorrections` can find our own injections in state on
+       *  later passes; the node only ever sees its own new output, so the
+       *  trailing-message count cannot serve as the run-level counter. */
+      correction.additional_kwargs = {
+        ...(correction.additional_kwargs ?? {}),
+        __autoContinueCorrection: true,
+      };
+      return { messages: [...produced, correction] };
+    };
+  }
+
+  createCallModel.__autoContinueWrapped = true;
+  StandardGraph.prototype.createCallModel = createCallModel;
+  logger.info('[agentAutoContinue] correction hook installed (agent node)');
+  return true;
+}
+
+function install() {
+  let toolNodeModule;
+  try {
+    /**
+     * Resolved as an absolute path, not `@librechat/agents/dist/...`: the
+     * package `exports` map does not publish the internal file, so a bare
+     * deep require throws ERR_PACKAGE_PATH_NOT_EXPORTED. Node keys its module
+     * cache by resolved filename, and the compiled graph reaches the same file
+     * via `require('../tools/ToolNode.cjs')`, so this is the identical module
+     * instance the graph calls into.
+     */
+    const path = require('path');
+    const agentsMain = require.resolve('@librechat/agents');
+    toolNodeModule = require(path.join(path.dirname(agentsMain), 'tools', 'ToolNode.cjs'));
+  } catch (error) {
+    logger.error('[agentAutoContinue] ToolNode module not resolvable, guard NOT installed', error);
+    return false;
+  }
+
+  const original = toolNodeModule.toolsCondition;
+  if (typeof original !== 'function') {
+    logger.warn('[agentAutoContinue] toolsCondition export missing, guard NOT installed');
+    return false;
+  }
+  if (original.__autoContinueWrapped === true) {
+    return true;
+  }
+
+  function toolsCondition(state, toolNode, invokedToolIds) {
+    const verdict = original(state, toolNode, invokedToolIds);
+    /** Only ever rewrite an END verdict; anything else is left alone. */
+    if (verdict !== '__end__' || typeof toolNode !== 'string') {
+      return verdict;
+    }
+    if (!toolNode.startsWith(TOOLS_PREFIX)) {
+      return verdict;
+    }
+    const messages = Array.isArray(state) ? state : state?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return verdict;
+    }
+    if (!shouldRetry(messages)) {
+      return verdict;
+    }
+    const agentNode = `${AGENT_PREFIX}${toolNode.slice(TOOLS_PREFIX.length)}`;
+    logger.info(
+      `[agentAutoContinue] stalled turn (consecutive=${countTrailingStalls(messages)}, cap=${MAX_CONSECUTIVE_STALLS || 'none'}) — re-invoking ${agentNode}`,
+    );
+    return agentNode;
+  }
+
+  toolsCondition.__autoContinueWrapped = true;
+  toolNodeModule.toolsCondition = toolsCondition;
+  logger.info('[agentAutoContinue] fallback route hook installed (toolsCondition)');
+  installNodeHook();
+  return true;
+}
+
+module.exports = {
+  install,
+  finishReason,
+  installNodeHook,
+  shouldRetry,
+  countTrailingStalls,
+  countCorrections,
+  buildCorrection,
+  INTENT,
+};
