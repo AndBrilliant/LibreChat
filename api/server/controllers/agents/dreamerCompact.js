@@ -28,18 +28,26 @@ const DREAMER_TIMEOUT_MS = Number(process.env.DREAMER_COMPRESS_TIMEOUT_MS) || 60
 /** Ask the dreamer for this conversation's compressed memory. The
  *  X-Conversation-Id header is the one-line "fork patch" that was missing —
  *  it lets build_meta read the right folded tree directly instead of guessing
- *  by content match. */
-async function fetchDreamerMeta(conversationId) {
+ *  by content match.
+ *  20260901: `noCatchup` (continuous mode) sends X-Dreamer-Catchup: never — the
+ *  send must NOT block on a catch-up fold; memory is taken as-is and the response's
+ *  `coverage.folded_through` tells us how far the fold currently reaches, so the
+ *  caller keeps any not-yet-folded tail verbatim. Returns { meta, coverage }. */
+async function fetchDreamerMeta(conversationId, noCatchup) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DREAMER_TIMEOUT_MS);
   try {
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Conversation-Id': conversationId || '',
+    };
+    if (noCatchup) {
+      headers['X-Dreamer-Catchup'] = 'never';
+    }
     const res = await fetch(DREAMER_URL, {
       method: 'POST',
       signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Conversation-Id': conversationId || '',
-      },
+      headers,
       body: JSON.stringify({
         model: 'adr-dreamer-compress',
         stream: false,
@@ -47,16 +55,37 @@ async function fetchDreamerMeta(conversationId) {
       }),
     });
     if (!res.ok) {
-      return null;
+      return { meta: null, coverage: null };
     }
     const json = await res.json();
     const meta = json && json.choices && json.choices[0] && json.choices[0].message
       ? json.choices[0].message.content
       : null;
-    return typeof meta === 'string' && meta.trim() ? meta : null;
+    return {
+      meta: typeof meta === 'string' && meta.trim() ? meta : null,
+      coverage: (json && json.coverage) || null,
+    };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Per-chat continuous-compaction mode (the spy popover toggle; stored on the
+ *  conversation doc by the dreamer service). Localhost read, fails open to off. */
+async function fetchConversationMode(conversationId) {
+  try {
+    const base = DREAMER_URL.replace(/\/v1\/chat\/completions$/, '');
+    const res = await fetch(`${base}/api/mode?cid=${encodeURIComponent(conversationId || '')}`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    const j = await res.json();
+    if (j && j.ok) {
+      return { continuous: !!j.continuous, retainTurns: Number(j.retain_turns) || 4 };
+    }
+  } catch {
+    /* mode service unreachable -> pressure-only behavior */
+  }
+  return { continuous: false, retainTurns: 4 };
 }
 
 /**
@@ -78,6 +107,9 @@ async function dreamerCompact({
   conversationId,
   force,
   countFn,
+  msgMeta,          // parallel array (index-aligned with payload): {id, createdAt, role}
+  continuous,       // 20260901: per-chat "continuous compaction mode"
+  retainTurns,      // verbatim floor in turns (default 3; continuous default 4)
 }) {
   const window = Number(maxContextTokens) || 0;
   if (!window || !Array.isArray(payload) || payload.length < 3) {
@@ -86,13 +118,17 @@ async function dreamerCompact({
 
   /** Auto-compact once the full thread crosses 85% of the window; "Compact now"
    *  lowers the bar to "there is meaningfully more here than a fresh chat". */
-  /* ADR: Compact now (force) ALWAYS compacts, whatever the model window. */
-  const needed = force ? true : promptTokenTotal > Math.floor(window * 0.85);
+  /* ADR: Compact now (force) ALWAYS compacts, whatever the model window.
+   *  20260901: continuous mode compacts EVERY send — memory from the beginning of
+   *  the thread + the last retainTurns verbatim, every single time. */
+  const needed = (force || continuous) ? true : promptTokenTotal > Math.floor(window * 0.85);
   if (!needed) {
     return { compacted: false };
   }
 
-  const meta = await fetchDreamerMeta(conversationId);
+  /** Continuous: never block the send on a catch-up fold (X-Dreamer-Catchup: never);
+   *  coverage.folded_through drives the zero-loss unfolded tail below. */
+  const { meta, coverage } = await fetchDreamerMeta(conversationId, continuous === true);
   if (!meta) {
     return { compacted: false };
   }
@@ -119,14 +155,14 @@ async function dreamerCompact({
    * older context, so we keep only a small verbatim tail (~15% of window) on
    * top of the hard RETAIN_TURNS floor. Was 0.75, which barely compressed. */
   const TAIL_FRACTION = 0.15;
-  const tailBudget = force ? 0 : Math.floor(window * TAIL_FRACTION) - metaTokens;
+  const tailBudget = (force || continuous) ? 0 : Math.floor(window * TAIL_FRACTION) - metaTokens;
 
   /** Hard floor: always keep the last `RETAIN_TURNS` full turns verbatim,
    *  regardless of budget, so the model always has the exact recent exchange
    *  (not just a summary of it). A "turn" starts at a user message; we walk
    *  back until we've passed RETAIN_TURNS user messages. Falls back to a
    *  message-count floor if roles aren't present on the formatted payload. */
-  const RETAIN_TURNS = 3;
+  const RETAIN_TURNS = Number(retainTurns) > 0 ? Number(retainTurns) : (continuous ? 4 : 3);
   let usersSeen = 0;
   let floorStart = payload.length - 1;
   for (let i = payload.length - 1; i >= 0; i--) {
@@ -143,14 +179,33 @@ async function dreamerCompact({
     floorStart = Math.max(0, payload.length - 4);
   }
 
+  /** 20260901 ZERO-LOSS RULE (continuous): any message newer than the fold's reach
+   *  (coverage.folded_through) rides verbatim even if it's older than the retained
+   *  tail — the dreamer being N turns behind just means N extra verbatim messages;
+   *  the badge/spy shows the lag, the send never blocks and never loses a turn. */
+  const foldedThrough = continuous && coverage && coverage.folded_through
+    ? String(coverage.folded_through) : null;
+  const unfoldedFrom = (() => {
+    if (!foldedThrough || !Array.isArray(msgMeta)) return null;
+    for (let i = 0; i < msgMeta.length; i++) {
+      const ts = msgMeta[i] && msgMeta[i].createdAt;
+      if (ts && String(ts) > foldedThrough) {
+        return i;   // first not-yet-folded message (ISO strings compare lexically)
+      }
+    }
+    return null;
+  })();
+
   /** Walk newest -> oldest. Everything at/after `floorStart` is force-kept
-   *  (the retained-turns floor); older messages are kept until the tail budget
-   *  is spent. */
+   *  (the retained-turns floor); in continuous mode, everything at/after
+   *  `unfoldedFrom` is force-kept too (zero-loss). Older messages are kept until
+   *  the tail budget is spent (pressure mode only). */
+  const hardKeepFrom = unfoldedFrom != null ? Math.min(floorStart, unfoldedFrom) : floorStart;
   const keep = [];
   let used = 0;
   for (let i = payload.length - 1; i >= 0; i--) {
     const tok = Number(indexTokenCountMap[i]) || 0;
-    if (i >= floorStart || used + tok <= tailBudget) {
+    if (i >= hardKeepFrom || used + tok <= tailBudget) {
       keep.push({ idx: i, tok });
       used += tok;
     } else {
@@ -190,9 +245,11 @@ async function dreamerCompact({
     retainedVerbatim: keep.length,
     floorMessages: payload.length - floorStart,
     floorTurns: usersSeen,
+    unfoldedKept: unfoldedFrom != null ? Math.max(0, floorStart - unfoldedFrom) : 0,
+    continuous: continuous === true,
     meta,
     metaTokens,
   };
 }
 
-module.exports = { dreamerCompact };
+module.exports = { dreamerCompact, fetchConversationMode };

@@ -1,6 +1,6 @@
 require('events').EventEmitter.defaultMaxListeners = 100;
 const { logger } = require('@librechat/data-schemas');
-const { dreamerCompact } = require('./dreamerCompact');
+const { dreamerCompact, fetchConversationMode } = require('./dreamerCompact');
 const { getBufferString, HumanMessage } = require('@librechat/agents/langchain/messages');
 const {
   createRun,
@@ -1343,6 +1343,12 @@ class AgentClient extends BaseClient {
     );
     try {
       const _compactT0 = Date.now();
+      /* 20260901: per-chat continuous compaction (spy popover toggle, stored on the
+       * conversation doc). When on, EVERY send is compacted: dreamer memory (linear,
+       * from the thread's beginning) + the last N turns verbatim + any not-yet-folded
+       * tail (zero-loss; never blocks waiting for the daemon). msgMeta is the
+       * index-aligned id/createdAt view of orderedMessages used for the unfolded tail. */
+      const _dcMode = await fetchConversationMode(this.conversationId);
       const dc = await dreamerCompact({
         payload,
         indexTokenCountMap,
@@ -1351,6 +1357,15 @@ class AgentClient extends BaseClient {
         conversationId: this.conversationId,
         force: this.options.forceCompaction === true,
         countFn: (t) => countTokens(t),
+        continuous: _dcMode.continuous,
+        retainTurns: _dcMode.retainTurns,
+        msgMeta: Array.isArray(orderedMessages)
+          ? orderedMessages.map((m) => ({
+              id: m && (m.messageId || m.id) || '',
+              createdAt: m && m.createdAt,
+              role: m && m.isCreatedByUser ? 'user' : 'assistant',
+            }))
+          : null,
       });
       const _compactMs = Date.now() - _compactT0;
       if (dc.compacted) {
@@ -1368,9 +1383,10 @@ class AgentClient extends BaseClient {
          */
         if (Array.isArray(this.contentParts)) {
           const statsHeader =
-            `⏱ **Reconstructive compaction** — folded ${dc.droppedCount} older message(s) ` +
+            `⏱ **${dc.continuous ? 'Continuous compaction' : 'Reconstructive compaction'}** — folded ${dc.droppedCount} older message(s) ` +
             `in ${_compactMs} ms · kept the last ${dc.floorTurns} turns verbatim ` +
-            `(${dc.retainedVerbatim} msgs) · dreamer memory ≈ ${dc.metaTokens} tokens`;
+            `(${dc.retainedVerbatim} msgs) · dreamer memory ≈ ${dc.metaTokens} tokens` +
+            (dc.unfoldedKept ? ` · +${dc.unfoldedKept} not-yet-folded kept verbatim` : '');
           /**
            * Persist an EXPANDABLE "Conversation summarized" bubble (Summary.tsx):
            * the compaction shows in the thread and the full reconstructive memory
