@@ -126,9 +126,20 @@ async function dreamerCompact({
     return { compacted: false };
   }
 
-  /** Continuous: never block the send on a catch-up fold (X-Dreamer-Catchup: never);
-   *  coverage.folded_through drives the zero-loss unfolded tail below. */
-  const { meta, coverage } = await fetchDreamerMeta(conversationId, continuous === true);
+  /** Non-blocking first, ALWAYS: take memory as-is and let the zero-loss rule
+   *  (unfolded tail rides verbatim) cover whatever the daemon hasn't folded yet.
+   *  The blocking catch-up fold is reserved for when the daemon is genuinely
+   *  far behind (cold chat or lag > 8) — previously EVERY auto compaction
+   *  blocked the send for 2-3 silent minutes while photek crawled through a
+   *  fold, which read as "the chat is down". */
+  let { meta, coverage } = await fetchDreamerMeta(conversationId, true);
+  if (!meta || !coverage || Number(coverage.lag) > 8) {
+    const blocking = await fetchDreamerMeta(conversationId, false);
+    if (blocking.meta) {
+      meta = blocking.meta;
+      coverage = blocking.coverage || coverage;
+    }
+  }
   if (!meta) {
     return { compacted: false };
   }
@@ -181,7 +192,7 @@ async function dreamerCompact({
    *  (coverage.folded_through) rides verbatim even if it's older than the retained
    *  tail — the dreamer being N turns behind just means N extra verbatim messages;
    *  the badge/spy shows the lag, the send never blocks and never loses a turn. */
-  const foldedThrough = continuous && coverage && coverage.folded_through
+  const foldedThrough = coverage && coverage.folded_through
     ? String(coverage.folded_through) : null;
   const unfoldedFrom = (() => {
     if (!foldedThrough || !Array.isArray(msgMeta)) return null;
