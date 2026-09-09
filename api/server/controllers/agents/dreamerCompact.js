@@ -110,6 +110,7 @@ async function dreamerCompact({
   msgMeta,          // parallel array (index-aligned with payload): {id, createdAt, role}
   continuous,       // 20260901: per-chat "continuous compaction mode"
   retainTurns,      // verbatim floor in turns (default 3; continuous default 4)
+  onStart,          // optional UI signal: fired when a compaction actually begins
 }) {
   const window = Number(maxContextTokens) || 0;
   if (!window || !Array.isArray(payload) || payload.length < 3) {
@@ -124,6 +125,17 @@ async function dreamerCompact({
   const needed = (force || continuous) ? true : promptTokenTotal > Math.floor(window * 0.85);
   if (!needed) {
     return { compacted: false };
+  }
+
+  /** Signal the client that a compaction is underway (the "compressing please
+   *  wait" state) — fired before the meta fetch, which is where any wait lives.
+   *  client.js emits on_summarize_start/complete around this. */
+  if (typeof onStart === 'function') {
+    try {
+      onStart();
+    } catch {
+      /* a UI signal must never break compaction */
+    }
   }
 
   /** Non-blocking first, ALWAYS: take memory as-is and let the zero-loss rule
@@ -205,13 +217,16 @@ async function dreamerCompact({
     return null;
   })();
 
-  /** Fill the budget with complete turns (newest first). */
+  /** Fill the budget with complete turns (newest first). The NEWEST turn is
+   *  sacred (Drew's rule 2026-09-09): it is always kept whole — only if it
+   *  alone overflows the whole context window do we cut into it (the fallback
+   *  below). Budget is a design target; the live turn is not negotiable. */
   let floorStart = payload.length;
   let used = 0;
   let keptTurns = 0;
   let truncated = false;
   for (const t of turns) {
-    if (used + t.tok <= TAIL_BUDGET) {
+    if (used + t.tok <= TAIL_BUDGET || keptTurns === 0) {
       floorStart = t.start;
       used += t.tok;
       keptTurns += 1;

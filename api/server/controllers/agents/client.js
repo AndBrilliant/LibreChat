@@ -1351,6 +1351,11 @@ class AgentClient extends BaseClient {
        * tail (zero-loss; never blocks waiting for the daemon). msgMeta is the
        * index-aligned id/createdAt view of orderedMessages used for the unfolded tail. */
       const _dcMode = await fetchConversationMode(this.conversationId);
+      /** "Compressing please wait": tell the client when a compaction starts
+       *  (stock ON_SUMMARIZE_START state) and always close it after, so a big
+       *  fold never reads as a dead send. */
+      let _dcStarted = false;
+      const _dcRes = this.options.res;
       const dc = await dreamerCompact({
         payload,
         indexTokenCountMap,
@@ -1361,6 +1366,23 @@ class AgentClient extends BaseClient {
         countFn: (t) => countTokens(t),
         continuous: _dcMode.continuous,
         retainTurns: _dcMode.retainTurns,
+        onStart: () => {
+          _dcStarted = true;
+          try {
+            sendEvent(_dcRes, {
+              event: 'on_summarize_start',
+              data: {
+                agentId: this.agent?.id ?? 'dreamer-compaction',
+                provider: 'dreamerCompress',
+                model: 'adr-dreamer-compress',
+                messagesToRefineCount: payload.length,
+                summaryVersion: 1,
+              },
+            });
+          } catch {
+            /* signal only */
+          }
+        },
         msgMeta: Array.isArray(orderedMessages)
           ? orderedMessages.map((m) => ({
               id: m && (m.messageId || m.id) || '',
@@ -1369,6 +1391,16 @@ class AgentClient extends BaseClient {
             }))
           : null,
       });
+      if (_dcStarted) {
+        try {
+          sendEvent(_dcRes, {
+            event: 'on_summarize_complete',
+            data: { id: 'dreamer-compress', agentId: this.agent?.id ?? 'dreamer-compaction' },
+          });
+        } catch {
+          /* signal only */
+        }
+      }
       const _compactMs = Date.now() - _compactT0;
       if (dc.compacted) {
         payload = dc.payload;
