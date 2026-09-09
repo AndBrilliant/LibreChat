@@ -47,6 +47,8 @@ import CollapseChat from './CollapseChat';
 import QuoteButton from './QuoteButton';
 import StreamAudio from './StreamAudio';
 import DreamerContextGauge from './DreamerContextGauge';
+import DreamerLagBadge from './DreamerLagBadge';
+import TokenSpeedHUD from './TokenSpeedHUD';
 import StopButton from './StopButton';
 import SendButton from './SendButton';
 import EditBadges from './EditBadges';
@@ -700,6 +702,8 @@ const ChatForm = memo(function ChatForm({
                 />
                 <div className="mx-auto flex" />
                 <DreamerContextGauge conversation={conversation} />
+                <TokenSpeedHUD conversation={conversation} isSubmitting={isSubmitting} />
+                <DreamerLagBadge conversation={conversation} />
                 {SpeechToText && (
                   <AudioRecorder
                     methods={methods}

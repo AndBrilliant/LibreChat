@@ -287,6 +287,10 @@ const startServer = async () => {
   app.use('/api/search', routes.search);
   app.use('/api/messages', routes.messages);
   app.use('/api/dreamer/compact-now', require('./routes/dreamerCompactNow'));
+  // ADR: dreamer popover proxy (lag badge -> spy popover, continuous-mode toggle,
+  // fold stream, nuke). Mounted at /api/dreamer so the popover's RELATIVE fetches
+  // (api/mode, api/lag, api/spy) resolve to /api/dreamer/api/*.
+  app.use('/api/dreamer', require('./routes/dreamerPopover'));
   app.use('/api/convos', routes.convos);
   app.use('/api/presets', routes.presets);
   app.use('/api/projects', routes.projects);

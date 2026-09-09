@@ -148,35 +148,33 @@ async function dreamerCompact({
   }
   metaTokens = Math.max(1, metaTokens);
 
-  /** How much recent tail to keep verbatim. Force keeps a tight recent window;
-   *  auto keeps up to ~75% of the model window. The remaining share is left as
-   *  headroom for the response + tool/instruction overhead. */
-  /* ADR: aggressive compression. The reconstructive meta summary carries the
-   * older context, so we keep only a small verbatim tail (~15% of window) on
-   * top of the hard RETAIN_TURNS floor. Was 0.75, which barely compressed. */
-  const TAIL_FRACTION = 0.15;
-  const tailBudget = (force || continuous) ? 0 : Math.floor(window * TAIL_FRACTION) - metaTokens;
+  /** 20260909 SIZE-DRIVEN TRUNCATION (new architecture): the verbatim tail is a
+   *  TOKEN BUDGET filled with as many COMPLETE both-side turns as fit — no
+   *  turn-count cap. Floor: TURN_FLOOR complete turns verbatim; if even the
+   *  floor overflows the budget, keep fewer turns and mark the cut with
+   *  ---truncated here---. Everything older rides the dreamer memory.
+   *
+   *  20260909b TOTAL BUNDLE CAP (Drew's design): compression + verbatim TOGETHER
+   *  are capped at TOTAL_BUDGET (default 80K of the 256K window) — the tail
+   *  budget is what remains AFTER the meta summary is paid for, so the whole
+   *  post-compaction bundle never crowds out the working window. */
+  const TOTAL_BUDGET = Math.max(20000, Number(process.env.DREAMER_TOTAL_BUDGET) || 80000);
+  const TAIL_BUDGET = Math.max(8000, TOTAL_BUDGET - metaTokens);
+  const TURN_FLOOR = Number(retainTurns) > 0 ? Number(retainTurns) : 4;
 
-  /** Hard floor: always keep the last `RETAIN_TURNS` full turns verbatim,
-   *  regardless of budget, so the model always has the exact recent exchange
-   *  (not just a summary of it). A "turn" starts at a user message; we walk
-   *  back until we've passed RETAIN_TURNS user messages. Falls back to a
-   *  message-count floor if roles aren't present on the formatted payload. */
-  const RETAIN_TURNS = Number(retainTurns) > 0 ? Number(retainTurns) : (continuous ? 4 : 3);
-  let usersSeen = 0;
-  let floorStart = payload.length - 1;
+  /** Group the tail into complete turns, newest first. A turn starts at a user
+   *  message and runs to the next-older user message (or the head fragment). */
+  const turns = [];
+  let tEnd = payload.length;
   for (let i = payload.length - 1; i >= 0; i--) {
-    floorStart = i;
     if (payload[i] && payload[i].role === 'user') {
-      usersSeen += 1;
-      if (usersSeen >= RETAIN_TURNS) {
-        break;
+      let tok = 0;
+      for (let j = i; j < tEnd; j++) {
+        tok += Number(indexTokenCountMap[j]) || 0;
       }
+      turns.push({ start: i, end: tEnd - 1, tok });
+      tEnd = i;
     }
-  }
-  if (usersSeen === 0) {
-    /** roles unavailable — keep the last 4 messages (~2 simple turns) */
-    floorStart = Math.max(0, payload.length - 4);
   }
 
   /** 20260901 ZERO-LOSS RULE (continuous): any message newer than the fold's reach
@@ -196,21 +194,56 @@ async function dreamerCompact({
     return null;
   })();
 
-  /** Walk newest -> oldest. Everything at/after `floorStart` is force-kept
-   *  (the retained-turns floor); in continuous mode, everything at/after
-   *  `unfoldedFrom` is force-kept too (zero-loss). Older messages are kept until
-   *  the tail budget is spent (pressure mode only). */
-  const hardKeepFrom = unfoldedFrom != null ? Math.min(floorStart, unfoldedFrom) : floorStart;
-  const keep = [];
+  /** Fill the budget with complete turns (newest first). */
+  let floorStart = payload.length;
   let used = 0;
-  for (let i = payload.length - 1; i >= 0; i--) {
-    const tok = Number(indexTokenCountMap[i]) || 0;
-    if (i >= hardKeepFrom || used + tok <= tailBudget) {
-      keep.push({ idx: i, tok });
-      used += tok;
+  let keptTurns = 0;
+  let truncated = false;
+  for (const t of turns) {
+    if (used + t.tok <= TAIL_BUDGET) {
+      floorStart = t.start;
+      used += t.tok;
+      keptTurns += 1;
     } else {
+      if (keptTurns < TURN_FLOOR) {
+        truncated = true;
+      }
       break;
     }
+  }
+  if (keptTurns < TURN_FLOOR) {
+    truncated = true;
+  }
+  if (floorStart === payload.length) {
+    /** roles unavailable (or the newest turn alone overflows): fall back to a
+     *  message-count floor, still budget-capped. */
+    floorStart = payload.length;
+    used = 0;
+    for (let i = payload.length - 1; i >= 0 && i >= payload.length - 4; i--) {
+      const tok = Number(indexTokenCountMap[i]) || 0;
+      if (used + tok > TAIL_BUDGET) {
+        truncated = true;
+        break;
+      }
+      floorStart = i;
+      used += tok;
+    }
+    if (floorStart === payload.length) {
+      floorStart = payload.length - 1;  // never compact away the live edge itself
+      used = Number(indexTokenCountMap[floorStart]) || 0;
+      truncated = true;
+    }
+  }
+
+  /** Keep everything at/after the truncation point (plus the zero-loss unfolded
+   *  span in continuous mode). Older messages ride the memory only. */
+  const hardKeepFrom = unfoldedFrom != null ? Math.min(floorStart, unfoldedFrom) : floorStart;
+  const keep = [];
+  used = 0;
+  for (let i = payload.length - 1; i >= hardKeepFrom; i--) {
+    const tok = Number(indexTokenCountMap[i]) || 0;
+    keep.push({ idx: i, tok });
+    used += tok;
   }
   keep.reverse();
 
@@ -223,7 +256,11 @@ async function dreamerCompact({
   const metaMsg = {
     role: 'system',
     content:
-      '[COMPACTED CONTEXT — earlier turns replaced by reconstructive memory]\n\n' + meta,
+      '[COMPACTED CONTEXT — earlier turns replaced by reconstructive memory]\n\n' + meta +
+      (truncated
+        ? '\n\n---truncated here--- (the verbatim thread below was cut short of the ' +
+          `${TURN_FLOOR}-turn floor to fit the context window; everything older is in the memory above)`
+        : ''),
   };
   const newPayload = [metaMsg, ...keep.map((k) => payload[k.idx])];
 
@@ -244,7 +281,9 @@ async function dreamerCompact({
     droppedCount: payload.length - keep.length,
     retainedVerbatim: keep.length,
     floorMessages: payload.length - floorStart,
-    floorTurns: usersSeen,
+    floorTurns: keptTurns,
+    truncated,
+    tailBudget: TAIL_BUDGET,
     unfoldedKept: unfoldedFrom != null ? Math.max(0, floorStart - unfoldedFrom) : 0,
     continuous: continuous === true,
     meta,
