@@ -1599,6 +1599,17 @@ class BaseClient {
     }
   }
 
+  /**
+   * ADR fork: true when this client is a vision-capable endpoint we control
+   * (the `vision` custom endpoint → openai/gpt-4o). ONLY these calls may
+   * receive real image bytes natively. Every other endpoint still diverts
+   * images — and all other attachment types — to the sandbox.
+   */
+  isVisionCapable() {
+    const endpoint = this.options.agent?.endpoint ?? this.options.endpoint;
+    return endpoint === 'vision';
+  }
+
   async processAttachments(message, attachments) {
     /** ADR fork: universal intercept. EVERY attachment — regardless of type —
      * gets diverted to a sandbox session instead of reaching the model, and
@@ -1607,22 +1618,40 @@ class BaseClient {
      * match any of those categories (e.g. zip archives, which LibreChat has
      * no native content-block type for and which some providers reject
      * outright — "invalid part type: file") are covered too, not just the
-     * types we happened to special-case. Falls open to the normal
-     * per-type handling below on any sandbox error. */
-    const sandboxNote = await divertAttachmentsToSandbox(
-      this.conversationId,
-      attachments,
-      getStrategyFunctions,
-      this.options.req,
-      'file',
-    );
-    if (sandboxNote) {
-      message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
-      message.image_urls = undefined;
-      message.documents = undefined;
-      message.videos = undefined;
-      message.audios = undefined;
-      return attachments;
+     * types we happened to special-case.
+     *
+     * Vision exception: on a vision-capable endpoint (see isVisionCapable),
+     * IMAGE attachments are allowed through natively so the model receives
+     * actual image bytes; every other attachment type is still diverted.
+     * Falls open to the normal per-type handling below on any sandbox error.
+     */
+    const isVisionCapable = this.isVisionCapable();
+    const isImage = (file) => file.type && file.type.startsWith('image/');
+    const attachmentsToDivert = isVisionCapable
+      ? attachments.filter((file) => !isImage(file))
+      : attachments;
+
+    let filesToProcess = attachments;
+    if (attachmentsToDivert.length) {
+      const sandboxNote = await divertAttachmentsToSandbox(
+        this.conversationId,
+        attachmentsToDivert,
+        getStrategyFunctions,
+        this.options.req,
+        'file',
+      );
+      if (sandboxNote) {
+        message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
+        message.documents = undefined;
+        message.videos = undefined;
+        message.audios = undefined;
+        if (isVisionCapable) {
+          filesToProcess = attachments.filter(isImage);
+        } else {
+          message.image_urls = undefined;
+          return attachments;
+        }
+      }
     }
 
     const categorizedAttachments = {
@@ -1647,7 +1676,7 @@ class BaseClient {
       });
     }
 
-    for (const file of attachments) {
+    for (const file of filesToProcess) {
       /** @type {FileSources} */
       const source = file.source ?? FileSources.local;
       if (source === FileSources.text) {

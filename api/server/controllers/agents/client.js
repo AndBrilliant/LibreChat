@@ -1026,8 +1026,10 @@ class AgentClient extends BaseClient {
     );
     /** ADR fork: divert real image bytes into a sandbox session instead of
      * sending them to the model. Falls back to normal attachment on any
-     * sandbox error, so this never blocks a chat turn. */
-    if (image_urls.length) {
+     * sandbox error, so this never blocks a chat turn. Vision-capable
+     * endpoints (see BaseClient.isVisionCapable) skip this diversion and
+     * receive the image bytes natively. */
+    if (image_urls.length && !this.isVisionCapable()) {
       const sandboxNote = await divertImagesToSandbox(this.conversationId, image_urls, files);
       if (sandboxNote) {
         message.text = message.text ? `${message.text}\n\n${sandboxNote}` : sandboxNote;
