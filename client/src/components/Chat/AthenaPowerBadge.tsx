@@ -41,6 +41,7 @@ function fmt(sec: number): string {
 
 export default function AthenaPowerBadge(): JSX.Element | null {
   const [stamp, setStamp] = useState<Stamp | null>(null);
+  const [waking, setWaking] = useState(false);
   const [, setNow] = useState(0);
 
   useEffect(() => {
@@ -55,6 +56,9 @@ export default function AthenaPowerBadge(): JSX.Element | null {
         const j = await r.json();
         if (!dead && j && typeof j.idle_seconds === 'number') {
           setStamp({ ...j, fetchedAt: Date.now() });
+          if (j.level === 'ready') {
+            setWaking(false);
+          }
         }
       } catch {
         if (!dead) {
@@ -95,21 +99,49 @@ export default function AthenaPowerBadge(): JSX.Element | null {
     label = '🔄 athena loading';
     title = `Athena is loading ${stamp.current_model ?? 'a model'}…`;
   } else if (stamp.level === 'l1-sleep' || toL1 <= 0) {
-    label = `💤 L1 · L2 in ${fmt(toL2)}`;
+    label = `💤 model asleep · off in ${fmt(toL2)}`;
     title = `Model unloaded (L1 sleep, host up). Full poweroff (L2) in ${fmt(toL2)}.`;
   } else {
     label = `🌙 L1 in ${fmt(toL1)} · L2 in ${fmt(toL2)}`;
     title = `Idle ${fmt(idle)} / ${stamp.l1_after}s. L1 = unload model (host up) in ${fmt(toL1)}; L2 = poweroff in ${fmt(toL2)}. Sending a message resets the clock.`;
   }
 
+  const asleep = stamp.level === 'off' || stamp.level === 'l1-sleep' || toL1 <= 0;
+  const loading = stamp.level === 'loading';
+  const wake = async () => {
+    setWaking(true);
+    try {
+      await fetch('/athena/power/wake', { method: 'POST' });
+    } catch {
+      setWaking(false);
+    }
+  };
+
   return (
     <span
       data-testid="athena-power-badge"
-      title={title}
-      className="ml-1 flex select-none items-center whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium"
-      style={{ color, opacity: 0.75 }}
+      className="ml-1 flex select-none items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium"
     >
-      {label}
+      <span title={title} style={{ color, opacity: 0.75 }}>
+        {label}
+      </span>
+      {(asleep || waking || loading) && (
+        <button
+          type="button"
+          data-testid="athena-wake-button"
+          onClick={wake}
+          disabled={waking || loading}
+          title={
+            loading || waking
+              ? 'Athena is coming back up…'
+              : 'Wake Athena now (starts the model, or powers the host on if it is off)'
+          }
+          className="rounded-full border border-border-medium px-2 py-0.5 text-[11px] font-medium transition-colors hover:bg-surface-hover disabled:opacity-60"
+          style={{ color: 'var(--text-primary, #1a1715)' }}
+        >
+          {waking || loading ? '⏳ waking…' : '⚡ wake'}
+        </button>
+      )}
     </span>
   );
 }
