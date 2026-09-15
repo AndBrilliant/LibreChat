@@ -11,6 +11,14 @@ import type { TMessage, TConversation } from 'librechat-data-provider';
  * the react-query cache (tokens ≈ chars/4), so it works for EVERY endpoint
  * and model — no server cooperation required. Renders as a small pill next
  * to the context gauge above the chat input.
+ *
+ * 2026-09-15 fix: the resumable-stream architecture (useResumableSSE) does
+ * not keep ChatForm's isSubmitting true for the life of the turn, so the
+ * old isSubmitting-gated sampler never started and the badge stayed hidden.
+ * The sampler is now GROWTH-DRIVEN: it keys off the one signal that always
+ * tracks generation — the newest assistant message's text actually growing.
+ * A 2-consecutive-sample streak guard ignores one-off cache writes
+ * (title-gen, finalize rewrites, compaction folds).
  */
 
 const SAMPLE_MS = 400;
@@ -55,6 +63,7 @@ export default function TokenSpeedHUD({
   conversation: TConversation | null;
   isSubmitting: boolean;
 }): JSX.Element | null {
+  void isSubmitting; // prop retained for call-site compatibility; sampler is growth-driven
   const conversationId = conversation?.conversationId ?? '';
   const queryClient = useQueryClient();
   const [liveRate, setLiveRate] = useState<number | null>(null);
@@ -63,13 +72,12 @@ export default function TokenSpeedHUD({
   const prevNRef = useRef(0);
   const turnTokensRef = useRef(0);
   const lastGrowthRef = useRef(0);
-  const wasSubmitting = useRef(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const timingRef = useRef(false);
+  const streakRef = useRef(0);
 
   /* A fresh chat streams under the server-assigned conversation id, not the
      prop's 'new' — so read across ALL message caches and take the newest
-     assistant message. Only sampled while submitting, so the newest one is
-     always ours. */
+     assistant message. Only growth matters, so the newest one is always ours. */
   const readTokens = () => {
     const all = queryClient.getQueriesData<TMessage[]>({ queryKey: [QueryKeys.messages] });
     let best = 0;
@@ -93,64 +101,47 @@ export default function TokenSpeedHUD({
     return best;
   };
 
-  /* reset on conversation switch */
+  /* reset on conversation switch; baseline counts existing text so an old
+     chat's content is never mistaken for fresh growth */
   useEffect(() => {
     setLiveRate(null);
     setFinalRate(null);
-    wasSubmitting.current = false;
+    timingRef.current = false;
+    streakRef.current = 0;
+    turnTokensRef.current = 0;
+    prevNRef.current = readTokens();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
 
-  /* stream start: begin sampling; stream end: freeze the average */
+  /* Growth-driven sampler. Growth on 2 consecutive samples -> begin timing;
+     live average every sample; >1.5s without growth -> freeze final average.
+     The stream-close rewrite can transiently shrink the text, so negative
+     deltas are ignored and never counted against the turn. */
   useEffect(() => {
-    if (isSubmitting && !wasSubmitting.current) {
-      startRef.current = performance.now();
-      lastGrowthRef.current = performance.now();
-      turnTokensRef.current = 0;
-      prevNRef.current = readTokens();
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-        timerRef.current = undefined;
-      }
-      setFinalRate(null);
-      setLiveRate(0);
-    }
-    if (wasSubmitting.current && !isSubmitting) {
-      /* measure to the last token that actually arrived, NOT to the
-         isSubmitting flip — title-gen and finalization keep it true for
-         seconds after the response text stops growing */
-      const elapsed = Math.max(
-        0.5,
-        ((lastGrowthRef.current || performance.now()) - startRef.current) / 1000,
-      );
-      /* the stream-close message rewrite can transiently shrink the text
-         (content parts normalize), and isSubmitting can flicker between
-         resume segments — so only freeze after a 1.5s still-idle grace, by
-         which time the real tokenCount has landed. A restart cancels this. */
-      timerRef.current = setTimeout(() => {
-        if (elapsed > 0.3 && turnTokensRef.current > 0) {
-          setFinalRate(turnTokensRef.current / elapsed);
-        }
-        setLiveRate(null);
-      }, 1500);
-    }
-    wasSubmitting.current = isSubmitting;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSubmitting, conversationId]);
-
-  /* clear pending refine timer on unmount */
-  useEffect(() => () => timerRef.current && clearTimeout(timerRef.current), []);
-
-  /* running turn average via delta accumulation — immune to message-shell
-     swaps, continuations, cache rewrites and background title-gen writes */
-  useEffect(() => {
-    if (!isSubmitting) {
-      return;
-    }
     const id = setInterval(() => {
       const now = performance.now();
       const n = readTokens();
       const dn = n - prevNRef.current;
       prevNRef.current = n;
+
+      if (!timingRef.current) {
+        if (dn > 0) {
+          streakRef.current += 1;
+          if (streakRef.current >= 2) {
+            timingRef.current = true;
+            startRef.current = lastGrowthRef.current || now;
+            turnTokensRef.current = 0;
+            setFinalRate(null);
+          }
+          lastGrowthRef.current = now;
+          turnTokensRef.current += dn;
+        } else {
+          streakRef.current = 0;
+          turnTokensRef.current = 0;
+        }
+        return;
+      }
+
       if (dn > 0) {
         turnTokensRef.current += dn;
         lastGrowthRef.current = now;
@@ -159,10 +150,18 @@ export default function TokenSpeedHUD({
       if (elapsed > 0.3 && turnTokensRef.current > 0) {
         setLiveRate(turnTokensRef.current / elapsed);
       }
+      if (now - lastGrowthRef.current > 1500 && turnTokensRef.current > 0) {
+        const el = Math.max(0.5, (lastGrowthRef.current - startRef.current) / 1000);
+        setFinalRate(turnTokensRef.current / el);
+        setLiveRate(null);
+        timingRef.current = false;
+        streakRef.current = 0;
+        turnTokensRef.current = 0;
+      }
     }, SAMPLE_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSubmitting, conversationId]);
+  }, [conversationId]);
 
   const rate = liveRate ?? finalRate;
   if (rate == null || rate <= 0) {
