@@ -128,10 +128,15 @@ export default function TokenSpeedHUD({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
 
-  /* Growth-driven sampler. Growth on 2 consecutive samples -> begin timing;
-     live average every sample; >1.5s without growth -> freeze final average.
-     The stream-close rewrite can transiently shrink the text, so negative
-     deltas are ignored and never counted against the turn. */
+  /* Growth-driven sampler, tuned for the fork's BURSTY cache writes: the
+     resumable-stream catch-up lands text in single big setQueryData writes
+     seconds apart, not a smooth per-delta trickle. So: ONE growth sample is
+     enough to start timing (a 2-sample streak can never form when each burst
+     is one write), and the freeze window is 4s so the gaps between bursts do
+     not end the turn. Rate = tokens grown / wall time since first growth, so
+     burst gaps honestly lower the shown rate (that IS the user-visible speed).
+     The stream-close rewrite can transiently shrink text; negative deltas are
+     ignored and never counted against the turn. */
   useEffect(() => {
     const id = setInterval(() => {
       const now = performance.now();
@@ -141,18 +146,11 @@ export default function TokenSpeedHUD({
 
       if (!timingRef.current) {
         if (dn > 0) {
-          streakRef.current += 1;
-          if (streakRef.current >= 2) {
-            timingRef.current = true;
-            startRef.current = lastGrowthRef.current || now;
-            turnTokensRef.current = 0;
-            setFinalRate(null);
-          }
+          timingRef.current = true;
+          startRef.current = now;
           lastGrowthRef.current = now;
-          turnTokensRef.current += dn;
-        } else {
-          streakRef.current = 0;
-          turnTokensRef.current = 0;
+          turnTokensRef.current = dn;
+          setFinalRate(null);
         }
         return;
       }
@@ -165,7 +163,7 @@ export default function TokenSpeedHUD({
       if (elapsed > 0.3 && turnTokensRef.current > 0) {
         setLiveRate(turnTokensRef.current / elapsed);
       }
-      if (now - lastGrowthRef.current > 1500 && turnTokensRef.current > 0) {
+      if (now - lastGrowthRef.current > 4000 && turnTokensRef.current > 0) {
         const el = Math.max(0.5, (lastGrowthRef.current - startRef.current) / 1000);
         setFinalRate(turnTokensRef.current / el);
         setLiveRate(null);
