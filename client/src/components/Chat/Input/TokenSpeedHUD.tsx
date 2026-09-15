@@ -92,11 +92,15 @@ export default function TokenSpeedHUD({
 
   /* A fresh chat streams under the server-assigned conversation id, not the
      prop's 'new' — so read across ALL message caches and take the newest
-     assistant message. Only growth matters, so the newest one is always ours. */
+     assistant message. Only growth matters, so the streaming message is always
+     the one that moves. NOTE: do NOT rank by createdAt — the streaming
+     placeholder's createdAt is empty (parses to 0), so timestamp ranking
+     silently selects an old completed message and the sampler sees no growth.
+     Instead SUM the last assistant message (array order) of every cache:
+     completed messages are static, so the sum grows only with the live stream. */
   const readTokens = () => {
     const all = queryClient.getQueriesData<TMessage[]>({ queryKey: [QueryKeys.messages] });
-    let best = 0;
-    let bestTs = 0;
+    let total = 0;
     for (const [, msgs] of all) {
       if (!Array.isArray(msgs)) {
         continue;
@@ -104,16 +108,12 @@ export default function TokenSpeedHUD({
       for (let i = msgs.length - 1; i >= 0; i--) {
         const m = msgs[i];
         if (m && m.isCreatedByUser === false) {
-          const ts = Date.parse(m.createdAt ?? '') || 0;
-          if (ts >= bestTs) {
-            bestTs = ts;
-            best = messageTokens(m);
-          }
+          total += messageTokens(m);
           break;
         }
       }
     }
-    return best;
+    return total;
   };
 
   /* reset on conversation switch; baseline counts existing text so an old
