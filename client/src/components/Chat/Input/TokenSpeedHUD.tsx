@@ -29,7 +29,25 @@ function messageTokens(m: TMessage): number {
   }
   /* reasoning models stream into content parts (think/reasoning + text) —
      count every known text-bearing field so the rate also moves while the
-     model is still thinking */
+     model is still thinking. Parts nest the payload one level deep:
+     { type:'text', text:{ value:'...' } } / { type:'think', think:{ thinking:'...' } },
+     so unwrap both plain strings AND {value}/{thinking} containers. */
+  const addNested = (v: unknown, depth: number): number => {
+    if (depth > 2 || v == null) {
+      return 0;
+    }
+    if (typeof v === 'string') {
+      return v.length;
+    }
+    if (typeof v === 'object') {
+      let n = 0;
+      for (const val of Object.values(v as Record<string, unknown>)) {
+        n += addNested(val, depth + 1);
+      }
+      return n;
+    }
+    return 0;
+  };
   const PART_KEYS = ['text', 'think', 'thinking', 'reasoning', 'reasoning_content'];
   const content: unknown = (m as { content?: unknown }).content;
   let chars = 0;
@@ -37,10 +55,7 @@ function messageTokens(m: TMessage): number {
     for (const p of content as Record<string, unknown>[]) {
       if (p && typeof p === 'object') {
         for (const k of PART_KEYS) {
-          const v = p[k];
-          if (typeof v === 'string') {
-            chars += v.length;
-          }
+          chars += addNested(p[k], 0);
         }
       }
     }
