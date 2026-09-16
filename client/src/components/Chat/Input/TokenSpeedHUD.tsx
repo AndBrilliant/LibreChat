@@ -231,7 +231,10 @@ export default function TokenSpeedHUD({
 
   const rate = liveRate ?? finalRate;
   const frozen = liveRate == null;
-  const label = `⚡ ${rate >= 100 ? rate.toFixed(0) : rate.toFixed(1)} tok/s`;
+  const label =
+    rate != null && rate > 0
+      ? `⚡ ${rate >= 100 ? rate.toFixed(0) : rate.toFixed(1)} tok/s`
+      : '';
   const pct = prefill != null ? Math.round(prefill.progress * 100) : 0;
 
   return (
