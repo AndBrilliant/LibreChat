@@ -229,6 +229,7 @@ export default function TokenSpeedHUD({
     };
   }, [conversationId]);
 
+  const rate = liveRate ?? finalRate;
   const frozen = liveRate == null;
   const label = `⚡ ${rate >= 100 ? rate.toFixed(0) : rate.toFixed(1)} tok/s`;
   const pct = prefill != null ? Math.round(prefill.progress * 100) : 0;
