@@ -83,6 +83,7 @@ export default function TokenSpeedHUD({
   const queryClient = useQueryClient();
   const [liveRate, setLiveRate] = useState<number | null>(null);
   const [finalRate, setFinalRate] = useState<number | null>(null);
+  const [prefill, setPrefill] = useState<{ progress: number; total: number } | null>(null);
   const startRef = useRef(0);
   const prevNRef = useRef(0);
   const turnTokensRef = useRef(0);
@@ -176,23 +177,91 @@ export default function TokenSpeedHUD({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
 
-  const rate = liveRate ?? finalRate;
-  if (rate == null || rate <= 0) {
-    return null;
-  }
+  /* Ingestion progress bar: llama.cpp exposes real per-slot prompt-processing
+     progress via /slots; the gateway fronts it at /athena/prefill. While a
+     request is ingesting (slot busy, no tokens decoded yet, progress < 1) the
+     UI otherwise shows dead air for MINUTES on big pastes (117K @ ~300 t/s).
+     Poll every 1.5s and render a real bar. Multi-slot: take the busiest
+     still-ingesting slot. Hidden when the gateway route is absent (LAN-direct)
+     or nothing is ingesting. Prefix-cache hits count as ingested (they are,
+     from the user's point of view). */
+  useEffect(() => {
+    let dead = false;
+    const poll = async () => {
+      try {
+        const r = await fetch('/athena/prefill');
+        if (!r.ok) {
+          throw new Error('no route');
+        }
+        const j = (await r.json()) as {
+          slots?: {
+            processing: boolean;
+            total: number;
+            processed: number;
+            cached: number;
+            decoded: number;
+            progress: number | null;
+          }[];
+        };
+        if (dead) {
+          return;
+        }
+        const ingesting = (j.slots ?? []).filter(
+          (s) => s.processing && s.progress != null && s.progress < 1 && s.decoded === 0,
+        );
+        if (ingesting.length > 0) {
+          const s = ingesting.reduce((a, b) => (a.total >= b.total ? a : b));
+          setPrefill({ progress: s.progress ?? 0, total: s.total });
+        } else {
+          setPrefill(null);
+        }
+      } catch {
+        if (!dead) {
+          setPrefill(null);
+        }
+      }
+    };
+    const id = setInterval(poll, 1500);
+    poll();
+    return () => {
+      dead = true;
+      clearInterval(id);
+    };
+  }, [conversationId]);
 
   const frozen = liveRate == null;
   const label = `⚡ ${rate >= 100 ? rate.toFixed(0) : rate.toFixed(1)} tok/s`;
+  const pct = prefill != null ? Math.round(prefill.progress * 100) : 0;
 
   return (
-    <span
-      data-testid="token-speed-hud"
-      title={frozen ? `final average: ${label}` : `live: ${label}`}
-      aria-live="polite"
-      className="ml-1 flex select-none items-center whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium text-text-secondary transition-colors duration-300"
-      style={{ opacity: frozen ? 0.75 : 1 }}
-    >
-      {label}
+    <span className="ml-1 flex select-none items-center whitespace-nowrap">
+      {prefill != null && (
+        <span
+          data-testid="prefill-hud"
+          title={`ingesting prompt: ${pct}% of ~${prefill.total.toLocaleString()} tokens`}
+          aria-live="polite"
+          className="mr-1 flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-text-secondary"
+        >
+          ⏳ {pct}%
+          <span className="relative h-1.5 w-16 overflow-hidden rounded-full bg-border-medium">
+            <span
+              className="absolute left-0 top-0 h-full rounded-full bg-text-secondary transition-all duration-1000"
+              style={{ width: `${pct}%` }}
+            />
+          </span>
+        </span>
+      )}
+      {rate != null && rate > 0 && (
+        <span
+          data-testid="token-speed-hud"
+          title={frozen ? `final average: ${label}` : `live: ${label}`}
+          aria-live="polite"
+          className="flex items-center whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium text-text-secondary transition-colors duration-300"
+          style={{ opacity: frozen ? 0.75 : 1 }}
+        >
+          {label}
+        </span>
+      )}
     </span>
   );
 }
