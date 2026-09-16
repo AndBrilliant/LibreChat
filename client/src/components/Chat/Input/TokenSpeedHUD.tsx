@@ -100,10 +100,6 @@ export default function TokenSpeedHUD({
      completed messages are static, so the sum grows only with the live stream. */
   const readTokens = () => {
     const all = queryClient.getQueriesData<TMessage[]>({ queryKey: [QueryKeys.messages] });
-    /* dedupe by messageId: during a fresh chat the SAME streaming message
-       transiently lives under two query keys (temp id + server id), and
-       summing both double-counts every token -> bogus 1000+ t/s spikes. */
-    const seen = new Set<string>();
     let total = 0;
     for (const [, msgs] of all) {
       if (!Array.isArray(msgs)) {
@@ -112,13 +108,7 @@ export default function TokenSpeedHUD({
       for (let i = msgs.length - 1; i >= 0; i--) {
         const m = msgs[i];
         if (m && m.isCreatedByUser === false) {
-          const id = typeof m.messageId === 'string' ? m.messageId : '';
-          if (!id || !seen.has(id)) {
-            if (id) {
-              seen.add(id);
-            }
-            total += messageTokens(m);
-          }
+          total += messageTokens(m);
           break;
         }
       }
